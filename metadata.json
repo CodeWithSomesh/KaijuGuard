@@ -1,0 +1,5 @@
+{
+  "name": "KaijuGuard Command Center",
+  "description": "Autonomous Command Agent interface for orchestrating rescue drone fleets in disaster zones with edge-first logic.",
+  "requestFramePermissions": []
+}
