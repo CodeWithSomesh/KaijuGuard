@@ -11,6 +11,8 @@ export class DroneAgent extends Agent {
   public target: { x: number; y: number } | null = null;
   public path: { x: number; y: number }[] = [];
   public history: { x: number; y: number }[] = [];
+  public queuedActions: { name: string, args: any }[] = [];
+  public payload = { medicalKits: 2, water: 5 };
 
   constructor(id: string, pos: { x: number; y: number }, public name: string) {
     super(id, pos);
@@ -111,8 +113,7 @@ export class DroneAgent extends Agent {
   step(model: DisasterModel): void {
     // Record history every few steps or on significant movement
     if (model.stepCount % 5 === 0) {
-      this.history.push({ ...this.pos });
-      if (this.history.length > 50) this.history.shift();
+      this.history = [...this.history, { ...this.pos }].slice(-50);
     }
 
     // Battery logic
@@ -139,7 +140,7 @@ export class DroneAgent extends Agent {
       const dy = nextWaypoint.y - this.pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      const speed = 0.02; // Approx 2km per step
+      const speed = 0.08; // Approx 8km per step (Fast KaijuGuard Drones)
       if (dist > speed) {
         this.pos.x += (dx / dist) * speed;
         this.pos.y += (dy / dist) * speed;
@@ -165,6 +166,30 @@ export class DroneAgent extends Agent {
     } else if (this.status === DroneStatus.DISPATCHED) {
       this.status = DroneStatus.SCANNING;
       this.target = null;
+      model.logsQueue.push({ msg: `[ARRIVAL] KaijuGuard ${this.id} reached destination.`, type: 'INFO' });
+
+      this.queuedActions.forEach(action => {
+        if (action.name === 'detect_survivors') {
+          if (Math.random() > 0.4) {
+            const s = new SurvivorAgent(`S-${Math.random().toString(36).substr(2, 5)}`, {
+              x: this.pos.x + (Math.random() - 0.5) * 0.1,
+              y: this.pos.y + (Math.random() - 0.5) * 0.1
+            });
+            model.addAgent(s);
+            model.logsQueue.push({ msg: `CRITICAL: Survivor signature found by ${this.id} upon arrival!`, type: "CRITICAL" });
+          } else {
+             model.logsQueue.push({ msg: `[SCAN] ${this.id} completed thermal sweep. Clear.`, type: "INFO" });
+          }
+        } else if (action.name === 'drop_payload') {
+          this.payload.medicalKits = Math.max(0, this.payload.medicalKits - 1);
+          model.logsQueue.push({ msg: `[ACTION] ${this.id} deployed medical supplies payload!`, type: "INFO" });
+        } else if (action.name === 'deploy_mesh') {
+          model.logsQueue.push({ msg: `[ACTION] ${this.id} firmly anchored mesh network micro-node.`, type: "INFO" });
+        } else if (action.name === 'structural_scan') {
+          model.logsQueue.push({ msg: `[ACTION] ${this.id} evaluated building structure via Lidar. Integrity compromised, proceed with caution.`, type: "WARNING" });
+        }
+      });
+      this.queuedActions = [];
     }
   }
 }
@@ -191,6 +216,7 @@ export class DisasterModel {
   public stepCount: number = 0;
   public stations: ChargingStation[] = [];
   public obstacles: Obstacle[] = [];
+  public logsQueue: {msg: string, type: any}[] = [];
 
   constructor(public width: number, public height: number) {}
 
@@ -219,8 +245,8 @@ export class DisasterModel {
           position: d.pos,
           target: d.target || undefined,
           history: d.history,
-          signal: 100, // Simplified
-          payload: { medicalKits: 2, water: 5 } // Simplified
+          signal: 100, 
+          payload: { medicalKits: d.payload.medicalKits, water: d.payload.water }
         };
       });
   }

@@ -174,12 +174,15 @@ const GLOBAL_LOCATIONS = Object.entries(GLOBAL_REGIONS).map(([name, data]) => ({
 }));
 
 export default function App() {
-  const [model, setModel] = useState<DisasterModel>(() => {
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => setIsMounted(true), []);
+
+  const modelRef = useRef<DisasterModel | null>(null);
+  if (!modelRef.current) {
     const m = new DisasterModel(120, 10);
     const initialRegion = GLOBAL_REGIONS["Malaysia"];
     m.stations = initialRegion.stations;
 
-    // Generate initial obstacles for the default region
     const obstacles: Obstacle[] = [];
     initialRegion.states.forEach((state, i) => {
       if (i % 2 === 0) {
@@ -196,12 +199,23 @@ export default function App() {
     });
     m.obstacles = obstacles;
 
-    // Initial Drones for Malaysia
-    initialRegion.states.forEach((s, i) => {
-      m.addAgent(new DroneAgent(`DR-0${i + 1}`, { x: s.lat, y: s.lng }, `KaijuGuard-${s.name}`));
+    const regionName = Object.keys(GLOBAL_REGIONS).find(k => GLOBAL_REGIONS[k] === initialRegion) || "Global";
+    initialRegion.states.forEach((s: any) => {
+      const droneCount = 2 + Math.floor(Math.random() * 5);
+      for (let i = 0; i < droneCount; i++) {
+        const jitterX = (Math.random() - 0.5) * 0.15;
+        const jitterY = (Math.random() - 0.5) * 0.15;
+        m.addAgent(new DroneAgent(
+          `DR-${regionName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
+          { x: s.lat + jitterX, y: s.lng + jitterY },
+          `KaijuGuard-${s.name}`
+        ));
+      }
     });
-    return m;
-  });
+
+    modelRef.current = m;
+  }
+  const model = modelRef.current;
 
   const [tick, setTick] = useState(0);
   const [drones, setDrones] = useState<Drone[]>([]);
@@ -218,6 +232,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'fleet' | 'global' | 'risk'>('fleet');
   const [rightTab, setRightTab] = useState<'analytics' | 'logs'>('analytics');
   const terminalEndRef = useRef<HTMLDivElement>(null);
+  const [currentTime, setCurrentTime] = useState("");
+
+  useEffect(() => {
+    setCurrentTime(new Date().toISOString());
+    const interval = setInterval(() => setCurrentTime(new Date().toISOString()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const getCurrentRegion = () => {
     let currentRegionName = "Malaysia";
@@ -280,19 +301,33 @@ export default function App() {
 
   // Sync state with model
   useEffect(() => {
-    setDrones(model.getDrones());
-    setSurvivors(model.getSurvivors());
-  }, [tick, model]);
+    // Deep clone to prevent React strict mode from recursively freezing simulation objects
+    setDrones(JSON.parse(JSON.stringify(modelRef.current!.getDrones())));
+    setSurvivors(JSON.parse(JSON.stringify(modelRef.current!.getSurvivors())));
+  }, [tick]);
 
   // Simulation Loop
   useEffect(() => {
     if (!isPlaying) return;
     const interval = setInterval(() => {
-      model.step();
+      modelRef.current!.step();
+      
+      // Process engine logs back into the UI
+      if (modelRef.current!.logsQueue && modelRef.current!.logsQueue.length > 0) {
+        const newLogs = modelRef.current!.logsQueue.map(l => ({
+          id: Math.random().toString(36).substr(2, 9),
+          timestamp: new Date().toLocaleTimeString(),
+          type: l.type,
+          message: l.msg
+        }));
+        setLogs(prev => [...prev, ...newLogs]);
+        modelRef.current!.logsQueue = [];
+      }
+      
       setTick(t => t + 1);
     }, 500);
     return () => clearInterval(interval);
-  }, [isPlaying, model]);
+  }, [isPlaying]);
 
   const generateObstacles = (region: any) => {
     const obstacles: Obstacle[] = [];
@@ -319,16 +354,25 @@ export default function App() {
     m.stations = region.stations;
     m.obstacles = generateObstacles(region);
 
-    // Spawn initial drones at the states of the current region
-    region.states.forEach((s, i) => {
-      m.addAgent(new DroneAgent(`DR-${i + 1}`, { x: s.lat, y: s.lng }, `KaijuGuard-${s.name}`));
+    const regionName = Object.keys(GLOBAL_REGIONS).find(k => GLOBAL_REGIONS[k] === region) || "Global";
+    region.states.forEach((s: any) => {
+      const droneCount = 2 + Math.floor(Math.random() * 5);
+      for (let i = 0; i < droneCount; i++) {
+        const jitterX = (Math.random() - 0.5) * 0.15;
+        const jitterY = (Math.random() - 0.5) * 0.15;
+        m.addAgent(new DroneAgent(
+          `DR-${regionName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
+          { x: s.lat + jitterX, y: s.lng + jitterY },
+          `KaijuGuard-${s.name}`
+        ));
+      }
     });
 
-    setModel(m);
+    modelRef.current = m;
     setTick(0);
     setLogs([]);
     setSurvivors([]);
-    addLog(`Simulation Reset. KaijuGuard Protocol Initialized for ${Object.keys(GLOBAL_REGIONS).find(k => GLOBAL_REGIONS[k] === region)} Sector.`, "INFO");
+    addLog(`Simulation Reset. KaijuGuard Protocol Initialized for ${regionName} Sector.`, "INFO");
   };
 
   const simulateEarthquake = () => {
@@ -346,43 +390,24 @@ export default function App() {
     model.stations = region.stations;
     model.obstacles = generateObstacles(region);
 
-    // Clear old drones and spawn new ones for this region
-    model.agents = model.agents.filter(a => !(a instanceof DroneAgent));
-    model.schedule = model.schedule.filter(a => !(a instanceof DroneAgent));
+    // Activate local KaijuGuard units present in the epicenter city
+    const localDrones = model.agents.filter(a => a instanceof DroneAgent && (a as DroneAgent).name === `KaijuGuard-${state.name}`) as DroneAgent[];
 
-    // Spawn drones from OTHER states in the region to converge on the epicenter
-    const otherStates = region.states.filter(s => s.name !== state.name);
-    const droneCount = 8; // Fixed count for consistency or variable
-
-    for (let i = 0; i < droneCount; i++) {
-      let startPos;
-      if (otherStates.length > 0) {
-        // Pick a random other state as starting point
-        const sourceState = otherStates[i % otherStates.length];
-        // Add some random jitter so they don't all start at the exact same point
-        startPos = {
-          x: sourceState.lat + (Math.random() - 0.5) * 0.2,
-          y: sourceState.lng + (Math.random() - 0.5) * 0.2
-        };
-      } else {
-        // Fallback to circle dispersion if only one state exists
-        const angle = (i / droneCount) * Math.PI * 2;
-        const radius = 1.0 + Math.random() * 1.5;
-        startPos = {
+    if (localDrones.length > 0) {
+      localDrones.forEach((drone, i) => {
+        drone.status = DroneStatus.DISPATCHED;
+        // Orbit the epicenter
+        const angle = (i / localDrones.length) * Math.PI * 2;
+        const radius = 0.05 + Math.random() * 0.1;
+        drone.setTarget({
           x: state.lat + Math.cos(angle) * radius,
           y: state.lng + Math.sin(angle) * radius
-        };
-      }
-
-      const drone = new DroneAgent(
-        `DR-${regionName.substring(0, 2)}-${i + 1}`,
-        startPos,
-        `KaijuGuard-${regionName}-${i + 1}`
-      );
-      drone.status = DroneStatus.DISPATCHED;
-      drone.setTarget({ x: state.lat, y: state.lng }, model);
-      model.addAgent(drone);
-      addLog(`[DISPATCH] Drone ${drone.id} launched from ${otherStates.length > 0 ? 'remote sector' : 'perimeter'} towards ${state.name}.`, "INFO");
+        }, model);
+        addLog(`[LOCAL SWARM] Unit ${drone.id} responding to tactical alert in ${state.name}.`, "INFO");
+      });
+      addLog(`COMMANDER: Swarm-intelligence algorithms managing ${localDrones.length} local units.`, "INFO");
+    } else {
+      addLog(`WARNING: No local units available in ${state.name}!`, "WARNING");
     }
 
     // Spawn survivors around epicenter
@@ -485,24 +510,72 @@ export default function App() {
           idleDrone.target = args.target_lat_long;
         }
         break;
-      case 'detect_survivors':
-        if (Math.random() > 0.4) {
-          const drone = droneAgents.find(d => d.id === args.drone_id);
-          if (drone) {
-            const s = new SurvivorAgent(`S-${Math.random().toString(36).substr(2, 5)}`, {
-              x: drone.pos.x + (Math.random() - 0.5) * 0.1,
-              y: drone.pos.y + (Math.random() - 0.5) * 0.1
-            });
-            model.addAgent(s);
-            addLog(`CRITICAL: ${s.type} detected by ${drone.id}!`, "CRITICAL");
+      case 'detect_survivors': // maps to thermal_scan
+      case 'drop_payload':
+      case 'deploy_mesh':
+      case 'structural_scan':
+        const targetActDrone = droneAgents.find(d => d.id === args.drone_id);
+        if (targetActDrone) {
+          // Queue the action if drone is still in transit to the target!
+          if (targetActDrone.status === DroneStatus.DISPATCHED) {
+            targetActDrone.queuedActions.push({ name, args });
+            addLog(`[COMMAND] ${name} assigned to ${targetActDrone.id} queue. Will execute upon arrival.`, "INFO");
+          } else {
+            // Drone is already at the location, execute instantly
+            if (name === 'detect_survivors') {
+              if (Math.random() > 0.4) {
+                const s = new SurvivorAgent(`S-${Math.random().toString(36).substr(2, 5)}`, {
+                  x: targetActDrone.pos.x + (Math.random() - 0.5) * 0.1,
+                  y: targetActDrone.pos.y + (Math.random() - 0.5) * 0.1
+                });
+                modelRef.current!.addAgent(s);
+                addLog(`CRITICAL: Survivor signature found instantly by ${targetActDrone.id}!`, "CRITICAL");
+              }
+            } else if (name === 'drop_payload') {
+              targetActDrone.payload.medicalKits = Math.max(0, targetActDrone.payload.medicalKits - 1);
+              addLog(`[ACTION] ${targetActDrone.id} deployed medical supplies payload!`, "INFO");
+            } else if (name === 'deploy_mesh') {
+              addLog(`[ACTION] ${targetActDrone.id} firmly anchored mesh network micro-node.`, "INFO");
+            } else if (name === 'structural_scan') {
+              addLog(`[ACTION] ${targetActDrone.id} evaluated building structure via Lidar.`, "INFO");
+            }
           }
         }
         break;
       case 'map_zone':
         addLog(`Mapping zone at ${args.coordinates.lat}, ${args.coordinates.lng}`, "INFO");
         break;
+      case 'move_to':
+        const targetMoveDrone = droneAgents.find(d => d.id === args.drone_id);
+        if (targetMoveDrone) {
+          addLog(`[COMMAND] Routing ${targetMoveDrone.id} to tactical waypoint [${args.x.toFixed(4)}, ${args.y.toFixed(4)}]`, "INFO");
+          targetMoveDrone.status = DroneStatus.DISPATCHED;
+          targetMoveDrone.setTarget({ x: args.x, y: args.y }, modelRef.current!);
+        }
+        break;
+      case 'return_to_base':
+        const targetChargeDrone = droneAgents.find(d => d.id === args.drone_id);
+        if (targetChargeDrone) {
+          let nearest = CHARGING_STATIONS[0];
+          let minDist = Infinity;
+          CHARGING_STATIONS.forEach(s => {
+            const dist = Math.sqrt(Math.pow(s.position.x - targetChargeDrone.pos.x, 2) + Math.pow(s.position.y - targetChargeDrone.pos.y, 2));
+            if (dist < minDist) {
+              minDist = dist;
+              nearest = s;
+            }
+          });
+          addLog(`[COMMAND] Recalling ${targetChargeDrone.id} to ${nearest.name} for charging`, "WARNING");
+          targetChargeDrone.status = DroneStatus.RETURNING;
+          targetChargeDrone.setTarget(nearest.position, modelRef.current!);
+        }
+        break;
     }
   };
+
+  if (!isMounted) {
+    return <div className="h-screen w-screen bg-black flex items-center justify-center text-[#00ff88] font-mono tracking-widest text-sm animate-pulse">INITIALIZING KAIJUGUARD PROTOCOLS...</div>;
+  }
 
   return (
     <div className="h-screen w-screen flex flex-col bg-black text-zinc-300 font-mono selection:bg-terminal-text selection:text-black">
@@ -864,32 +937,7 @@ export default function App() {
                   </Overlay>
                 ))}
 
-                {/* History Lines */}
-                {drones.map(drone => (
-                  <React.Fragment key={`history-group-${drone.id}`}>
-                    {drone.history.slice(1).map((pos, idx) => {
-                      const prevPos = drone.history[idx];
-                      const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
-                      return (
-                        // @ts-ignore
-                        <Overlay key={`history-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
-                          <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
-                            <line
-                              x1="0"
-                              y1="0"
-                              x2={offset.dx}
-                              y2={offset.dy}
-                              stroke="#00ff88"
-                              strokeWidth="1.5"
-                              strokeOpacity="0.5"
-                              className="filter drop-shadow-[0_0_2px_#00ff88]"
-                            />
-                          </svg>
-                        </Overlay>
-                      );
-                    })}
-                  </React.Fragment>
-                ))}
+
 
                 {/* Obstacles */}
                 {model.obstacles.map(obs => (
@@ -920,38 +968,34 @@ export default function App() {
                 ))}
 
                 {/* Trajectory Paths (A* Waypoints) */}
-                {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).map(drone => {
+                {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).flatMap(drone => {
                   const droneAgent = model.agents.find(a => a.id === drone.id) as DroneAgent;
-                  if (!droneAgent || droneAgent.path.length === 0) return null;
+                  if (!droneAgent || droneAgent.path.length === 0) return [];
 
                   const fullPath = [{ x: drone.position.x, y: drone.position.y }, ...droneAgent.path];
 
-                  return (
-                    <React.Fragment key={`path-group-${drone.id}`}>
-                      {fullPath.slice(1).map((pos, idx) => {
-                        const prevPos = fullPath[idx];
-                        const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
-                        return (
-                          // @ts-ignore
-                          <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
-                            <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
-                              <line
-                                x1="0"
-                                y1="0"
-                                x2={offset.dx}
-                                y2={offset.dy}
-                                stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
-                                strokeWidth="2"
-                                strokeDasharray="6 6"
-                                strokeOpacity={1 - (idx / fullPath.length) * 0.6}
-                                className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
-                              />
-                            </svg>
-                          </Overlay>
-                        );
-                      })}
-                    </React.Fragment>
-                  );
+                  return fullPath.slice(1).map((pos, idx) => {
+                    const prevPos = fullPath[idx];
+                    const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
+                    return (
+                      // @ts-ignore
+                      <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                        <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
+                          <line
+                            x1="0"
+                            y1="0"
+                            x2={offset.dx}
+                            y2={offset.dy}
+                            stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
+                            strokeWidth="2"
+                            strokeDasharray="6 6"
+                            strokeOpacity={1 - (idx / fullPath.length) * 0.6}
+                            className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
+                          />
+                        </svg>
+                      </Overlay>
+                    );
+                  });
                 })}
 
                 {/* Charging Stations */}
@@ -986,36 +1030,25 @@ export default function App() {
                       }}
                     >
                       <div className="relative group">
-                        {/* Tactical Diamond Frame */}
-                        <div className="absolute inset-0 translate-y-[2px] translate-z-[-2px] bg-black/40 blur-[1px] transform rotate-45" />
-                        
                         <div className={cn(
-                          "w-7 h-7 flex items-center justify-center bg-black/90 relative z-10 transform rotate-45 border transition-all duration-300",
-                          drone.battery < 15 ? "border-red-500 shadow-[0_0_15px_rgba(255,0,0,0.5)]" : "border-[#00ff88] shadow-[0_0_15px_rgba(0,255,136,0.3)]",
-                          drone.status === DroneStatus.SCANNING && "animate-pulse"
+                          "w-10 h-10 flex items-center justify-center relative z-10 transition-all duration-300",
+                          drone.status === DroneStatus.SCANNING && "animate-pulse",
+                          drone.battery < 15 && "filter drop-shadow-[0_0_8px_rgba(255,0,0,0.8)]"
                         )}>
-                          {/* Inner unrotated icon */}
-                          <div className="-rotate-45 flex items-center justify-center w-full h-full">
-                            {drone.status === DroneStatus.IDLE ? (
-                              <Shield className={cn("w-3.5 h-3.5", drone.battery < 15 ? "text-red-500" : "text-[#00ff88]")} />
-                            ) : (
-                              <Navigation 
-                                className={cn("w-3.5 h-3.5 drop-shadow-[0_0_4px_currentColor]", drone.battery < 15 ? "text-red-500" : "text-[#00ff88]")} 
-                                style={{ transform: `rotate(${Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90}deg)` }}
-                              />
-                            )}
-                          </div>
+                          <img 
+                            src="/drone_icon.png" 
+                            alt="Tactical Drone"
+                            className={cn("w-full h-full object-contain", drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200")}
+                            style={{ 
+                              transform: `rotate(${drone.target ? Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90 : 0}deg)` 
+                            }}
+                          />
                         </div>
 
-                        {/* Tactical Outer Rings */}
-                        <div className={cn(
-                          "absolute -inset-3 border border-dotted rounded-full animate-[spin_4s_linear_infinite] z-0 opacity-60",
-                          drone.battery < 15 ? "border-red-500" : "border-[#00ff88]"
-                        )} />
-                        <div className={cn(
-                          "absolute -inset-2 border-2 border-t-transparent border-b-transparent rounded-full animate-[spin_8s_linear_infinite_reverse] z-0 opacity-40",
-                          drone.battery < 15 ? "border-red-500" : "border-[#00ff88]"
-                        )} />
+                        {/* Low Battery Indicator Ring */}
+                        {drone.battery < 15 && (
+                           <div className="absolute -inset-2 border-2 border-red-500 border-dashed rounded-full animate-[spin_3s_linear_infinite] z-0 opacity-80" />
+                        )}
                       </div>
                       <span className="text-xs font-semibold font-bold bg-black/80 px-1 mt-1 border border-terminal-text/20 shadow-md z-20">
                         {drone.id}
@@ -1160,7 +1193,7 @@ export default function App() {
                         <span className="text-terminal-text text-lg">{(drones.reduce((acc, d) => acc + d.battery, 0) / (drones.length || 1)).toFixed(1)}%</span>
                       </div>
                       <div className="h-40 w-full">
-                        <ResponsiveContainer width="100%" height="100%">
+                        <ResponsiveContainer width="100%" height="100%" minHeight={160} minWidth={100}>
                           <AreaChart data={drones}>
                             <defs>
                               <linearGradient id="colorBatt" x1="0" y1="0" x2="0" y2="1">
@@ -1257,8 +1290,8 @@ export default function App() {
                             </span>
                             <span className="text-gray-200 text-xs leading-relaxed">{log.message}</span>
                             {log.summary && (
-                              <div className="mt-2 p-3 bg-terminal-text/5 border-l-2 border-terminal-text/40 text-gray-300 text-xs italic shadow-inner">
-                                {log.summary}
+                              <div className="mt-2 p-3 bg-terminal-text/5 border-l-2 border-terminal-text/40 text-gray-300 text-xs italic shadow-inner break-words">
+                                {typeof log.summary === 'string' ? log.summary : typeof log.summary === 'object' ? (log.summary as any)[0]?.text || JSON.stringify(log.summary) : String(log.summary)}
                               </div>
                             )}
                             {log.toolCall && (
@@ -1288,7 +1321,7 @@ export default function App() {
         <div className="flex items-center gap-4">
           <span>Latency: 42ms</span>
           <span>Buffer: 0%</span>
-          <span>{new Date().toISOString()}</span>
+          <span>{currentTime || "SYNCING..."}</span>
         </div>
       </footer>
     </div>
