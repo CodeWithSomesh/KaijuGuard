@@ -117,7 +117,7 @@ export class DroneAgent extends Agent {
     }
 
     // Battery logic
-    if (this.status !== DroneStatus.CHARGING && this.status !== DroneStatus.IDLE) {
+    if (this.status !== DroneStatus.CHARGING && this.status !== DroneStatus.IDLE && this.status !== DroneStatus.STUCK) {
       this.battery = Math.max(0, this.battery - 0.2);
       
       // Auto-return to base if battery is low
@@ -140,7 +140,7 @@ export class DroneAgent extends Agent {
       const dy = nextWaypoint.y - this.pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      const speed = 0.08; // Approx 8km per step (Fast KaijuGuard Drones)
+      const speed = 0.015; // Slower cinematic movement
       if (dist > speed) {
         this.pos.x += (dx / dist) * speed;
         this.pos.y += (dy / dist) * speed;

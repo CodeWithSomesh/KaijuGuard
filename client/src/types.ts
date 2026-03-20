@@ -6,6 +6,7 @@ export enum DroneStatus {
   CHARGING = "CHARGING",
   EMERGENCY = "EMERGENCY",
   BROADCASTING = "BROADCASTING",
+  STUCK = "STUCK",
 }
 
 export interface Drone {

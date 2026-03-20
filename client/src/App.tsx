@@ -169,6 +169,16 @@ const GLOBAL_REGIONS: Record<string, { lat: number, lng: number, zoom: number, s
   },
 };
 
+Object.keys(GLOBAL_REGIONS).forEach(region => {
+  GLOBAL_REGIONS[region].stations = GLOBAL_REGIONS[region].states.map((s, i) => ({
+    id: `CS-${region.substring(0, 2).toUpperCase()}-${i}`,
+    name: `${s.name} Station`,
+    position: { x: s.lat, y: s.lng },
+    capacity: 10,
+    activeUnits: 0
+  }));
+});
+
 const GLOBAL_LOCATIONS = Object.entries(GLOBAL_REGIONS).map(([name, data]) => ({
   name,
   lat: data.lat,
@@ -227,7 +237,7 @@ function MapboxView({
       antialias: true,
     });
 
-     mapRef.current.on('style.load', () => {
+    mapRef.current.on('style.load', () => {
       // Inject popup styles
       if (!document.getElementById('mapbox-popup-style')) {
         const s = document.createElement('style');
@@ -453,9 +463,9 @@ function MapboxView({
                 style={{
                   transform: `rotate(${drone.target
                     ? Math.atan2(
-                        drone.target.y - drone.position.y,
-                        drone.target.x - drone.position.x
-                      ) * 180 / Math.PI + 90
+                      drone.target.y - drone.position.y,
+                      drone.target.x - drone.position.x
+                    ) * 180 / Math.PI + 90
                     : 0}deg)`
                 }}
               />
@@ -761,7 +771,7 @@ export default function App() {
     if (!isPlaying) return;
     const interval = setInterval(() => {
       modelRef.current!.step();
-      
+
       // Process engine logs back into the UI
       if (modelRef.current!.logsQueue && modelRef.current!.logsQueue.length > 0) {
         const newLogs = modelRef.current!.logsQueue.map(l => ({
@@ -773,29 +783,14 @@ export default function App() {
         setLogs(prev => [...prev, ...newLogs]);
         modelRef.current!.logsQueue = [];
       }
-      
+
       setTick(t => t + 1);
     }, 500);
     return () => clearInterval(interval);
   }, [isPlaying]);
 
   const generateObstacles = (region: any) => {
-    const obstacles: Obstacle[] = [];
-    // Generate 4-6 random obstacles in the region
-    const count = 4 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < count; i++) {
-      const state = region.states[Math.floor(Math.random() * region.states.length)];
-      obstacles.push({
-        id: `OBS-${Math.random().toString(36).substr(2, 5)}`,
-        position: {
-          x: state.lat + (Math.random() - 0.5) * 2.0,
-          y: state.lng + (Math.random() - 0.5) * 2.0
-        },
-        radius: 0.15 + Math.random() * 0.25, // ~15-40km
-        type: Math.random() > 0.5 ? "NO_FLY_ZONE" : "WEATHER_HAZARD"
-      });
-    }
-    return obstacles;
+    return []; // Hazard zones disabled
   };
 
   const handleReset = () => {
@@ -812,7 +807,7 @@ export default function App() {
         const jitterY = (Math.random() - 0.5) * 0.15;
         m.addAgent(new DroneAgent(
           `DR-${regionName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
-          { x: s.lat + jitterX, y: s.lng + jitterY },
+          { x: s.lat, y: s.lng }, // Spawn exactly at the charging station initially
           `KaijuGuard-${s.name}`
         ));
       }
@@ -1081,7 +1076,7 @@ export default function App() {
             className="px-4 py-2 border border-alert/60 bg-alert/10 text-alert hover:bg-alert hover:text-white transition-all text-xs font-bold uppercase tracking-widest flex items-center gap-2"
           >
             <AlertTriangle className="w-4 h-4" />
-            Simulate Earthquake
+            Simulate Disaster
           </button>
           <div className="flex flex-col items-end">
             <span className="text-base font-semibold opacity-50 uppercase tracking-widest">Zone Coordinates</span>
@@ -1143,12 +1138,12 @@ export default function App() {
                   className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar"
                 >
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-base font-semibold font-bold uppercase tracking-widest opacity-50">Active Units</h3>
+                    <h3 className="text-base font-semibold font-bold uppercase tracking-widest opacity-50">Deployed Units</h3>
                     <span className="text-base font-semibold px-1.5 py-0.5 border border-terminal-text/30 rounded">
-                      {drones.length} ONLINE
+                      {drones.filter(d => d.status !== DroneStatus.IDLE).length} ACTIVE
                     </span>
                   </div>
-                  {drones.map(drone => (
+                  {drones.filter(d => d.status !== DroneStatus.IDLE).map(drone => (
                     <motion.div
                       key={drone.id}
                       onClick={() => setSelectedDrone(drone.id === selectedDrone ? null : drone.id)}
@@ -1343,249 +1338,328 @@ export default function App() {
           <div
             className="flex-1 relative bg-zinc-900 overflow-hidden">
             {!is3D && isMounted && (
-            <div className="w-full h-full">
-              <Map
-                center={mapCenter}
-                zoom={mapZoom}
-                onBoundsChanged={({ center, zoom }) => {
-                  setMapCenter(center);
-                  setMapZoom(zoom);
-                }}
-                onClick={() => setContextMenu(null)}
-                dprs={[1, 2]}
-                metaWheelZoom={true}
-                provider={(x, y, z) => {
-                  if (mapType === 'dark') {
-                    return `https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/${z}/${x}/${y}.png`;
-                  }
-                  const lyrs = mapType === 'satellite' ? 's' : mapType === 'hybrid' ? 'y' : mapType === 'terrain' ? 'p' : 'm';
-                  return `https://mt1.google.com/vt/lyrs=${lyrs}&x=${x}&y=${y}&z=${z}`;
-                }}
-              >
-                <ZoomControl />
+              <div className="w-full h-full">
+                <Map
+                  center={mapCenter}
+                  zoom={mapZoom}
+                  onBoundsChanged={({ center, zoom }) => {
+                    setMapCenter(center);
+                    setMapZoom(zoom);
+                  }}
+                  onClick={() => setContextMenu(null)}
+                  dprs={[1, 2]}
+                  metaWheelZoom={true}
+                  provider={(x, y, z) => {
+                    if (mapType === 'dark') {
+                      return `https://cartodb-basemaps-a.global.ssl.fastly.net/dark_all/${z}/${x}/${y}.png`;
+                    }
+                    const lyrs = mapType === 'satellite' ? 's' : mapType === 'hybrid' ? 'y' : mapType === 'terrain' ? 'p' : 'm';
+                    return `https://mt1.google.com/vt/lyrs=${lyrs}&x=${x}&y=${y}&z=${z}`;
+                  }}
+                >
+                  <ZoomControl />
 
-                {/* City Labels */}
-                {getCurrentRegion().states.map(state => (
-                  // @ts-ignore
-                  <Overlay key={`label-${state.name}`} anchor={[state.lat, state.lng]}>
-                    <div className="flex flex-col items-center pointer-events-none">
-                      <div className="w-1 h-1 bg-white/40 rounded-full mb-1" />
-                      <span className="text-base font-semibold font-display font-bold text-white/60 uppercase tracking-widest whitespace-nowrap drop-shadow-md">
-                        {state.name}
-                      </span>
-                    </div>
-                  </Overlay>
-                ))}
+                  {/* City Labels */}
+                  {getCurrentRegion().states.map(state => (
+                    // @ts-ignore
+                    <Overlay key={`label-${state.name}`} anchor={[state.lat, state.lng]}>
+                      <div className="flex flex-col items-center pointer-events-none">
+                        <div className="w-1 h-1 bg-white/40 rounded-full mb-1" />
+                        <span className="text-base font-semibold font-display font-bold text-white/60 uppercase tracking-widest whitespace-nowrap drop-shadow-md">
+                          {state.name}
+                        </span>
+                      </div>
+                    </Overlay>
+                  ))}
 
-                {/* History Lines */}
-                {drones.map(drone => (
-                  <MapGroup key={`history-group-${drone.id}`}>
-                    {drone.history.slice(1).map((pos, idx) => {
-                      const prevPos = drone.history[idx];
-                      const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
-                      return (
-                        // @ts-ignore
-                        <Overlay key={`history-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
-                          <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
-                            <line
-                              x1="0"
-                              y1="0"
-                              x2={offset.dx}
-                              y2={offset.dy}
-                              stroke="#00ff88"
-                              strokeWidth="1.5"
-                              strokeOpacity="0.5"
-                              className="filter drop-shadow-[0_0_2px_#00ff88]"
-                            />
-                          </svg>
-                        </Overlay>
-                      );
-                    })}
-                  </MapGroup>
-                ))}
+                  {/* History Lines */}
+                  {drones.map(drone => (
+                    <MapGroup key={`history-group-${drone.id}`}>
+                      {drone.history.slice(1).map((pos, idx) => {
+                        const prevPos = drone.history[idx];
+                        const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
+                        return (
+                          // @ts-ignore
+                          <Overlay key={`history-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                            <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
+                              <line
+                                x1="0"
+                                y1="0"
+                                x2={offset.dx}
+                                y2={offset.dy}
+                                stroke="#00ff88"
+                                strokeWidth="1.5"
+                                strokeOpacity="0.5"
+                                className="filter drop-shadow-[0_0_2px_#00ff88]"
+                              />
+                            </svg>
+                          </Overlay>
+                        );
+                      })}
+                    </MapGroup>
+                  ))}
 
-                {/* Obstacles */}
-                {model.obstacles.map(obs => (
-                  // @ts-ignore
-                  <Overlay key={obs.id} anchor={[obs.position.x, obs.position.y]}>
-                    <div className="relative flex items-center justify-center pointer-events-none">
-                      <motion.div
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        className={cn(
-                          "rounded-full border-2 flex items-center justify-center",
-                          obs.type === "NO_FLY_ZONE" ? "bg-alert/10 border-alert/40" : "bg-warning/10 border-warning/40"
-                        )}
-                        style={{
-                          width: obs.radius * 200 * (mapZoom / 5),
-                          height: obs.radius * 200 * (mapZoom / 5)
-                        }}
-                      >
-                        <div className="flex flex-col items-center">
-                          {obs.type === "NO_FLY_ZONE" ? <ShieldAlert className="w-3 h-3 text-alert" /> : <CloudLightning className="w-3 h-3 text-warning" />}
-                          <span className="text-[6px] font-bold uppercase tracking-tighter opacity-60">
-                            {obs.type === "NO_FLY_ZONE" ? "NFZ" : "HAZARD"}
-                          </span>
-                        </div>
-                      </motion.div>
-                    </div>
-                  </Overlay>
-                ))}
+                  {/* Obstacles */}
+                  {model.obstacles.map(obs => (
+                    // @ts-ignore
+                    <Overlay key={obs.id} anchor={[obs.position.x, obs.position.y]}>
+                      <div className="relative flex items-center justify-center pointer-events-none">
+                        <motion.div
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1 }}
+                          className={cn(
+                            "rounded-full border-2 flex items-center justify-center",
+                            obs.type === "NO_FLY_ZONE" ? "bg-alert/10 border-alert/40" : "bg-warning/10 border-warning/40"
+                          )}
+                          style={{
+                            width: obs.radius * 200 * (mapZoom / 5),
+                            height: obs.radius * 200 * (mapZoom / 5)
+                          }}
+                        >
+                          <div className="flex flex-col items-center">
+                            {obs.type === "NO_FLY_ZONE" ? <ShieldAlert className="w-3 h-3 text-alert" /> : <CloudLightning className="w-3 h-3 text-warning" />}
+                            <span className="text-[6px] font-bold uppercase tracking-tighter opacity-60">
+                              {obs.type === "NO_FLY_ZONE" ? "NFZ" : "HAZARD"}
+                            </span>
+                          </div>
+                        </motion.div>
+                      </div>
+                    </Overlay>
+                  ))}
 
-                {/* Trajectory Paths (A* Waypoints) */}
-                {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).map(drone => {
-                  const droneAgent = model.agents.find(a => a.id === drone.id) as DroneAgent;
-                  if (!droneAgent || droneAgent.path.length === 0) return null;
+                  {/* Trajectory Paths (A* Waypoints) */}
+                  {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).map(drone => {
+                    const droneAgent = model.agents.find(a => a.id === drone.id) as DroneAgent;
+                    if (!droneAgent || droneAgent.path.length === 0) return null;
 
-                  const fullPath = [{ x: drone.position.x, y: drone.position.y }, ...droneAgent.path];
+                    const fullPath = [{ x: drone.position.x, y: drone.position.y }, ...droneAgent.path];
 
-                  return (<MapGroup key={`path-group-${drone.id}`}>
-                  {fullPath.slice(1).map((pos, idx) => {
-                    const prevPos = fullPath[idx];
-                    const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
-                    return (
-                      // @ts-ignore
-                      <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
-                        <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
-                          <line
-                            x1="0"
-                            y1="0"
-                            x2={offset.dx}
-                            y2={offset.dy}
-                            stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
-                            strokeWidth="2"
-                            strokeDasharray="6 6"
-                            strokeOpacity={1 - (idx / fullPath.length) * 0.6}
-                            className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
-                          />
-                        </svg>
-                      </Overlay>
+                    return (<MapGroup key={`path-group-${drone.id}`}>
+                      {fullPath.slice(1).map((pos, idx) => {
+                        const prevPos = fullPath[idx];
+                        const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
+                        return (
+                          // @ts-ignore
+                          <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                            <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
+                              <line
+                                x1="0"
+                                y1="0"
+                                x2={offset.dx}
+                                y2={offset.dy}
+                                stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
+                                strokeWidth="2"
+                                strokeDasharray="6 6"
+                                strokeOpacity={1 - (idx / fullPath.length) * 0.6}
+                                className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
+                              />
+                            </svg>
+                          </Overlay>
+                        );
+                      })}
+                    </MapGroup>
                     );
                   })}
-                </MapGroup>
-              );
-                })}
 
-                {/* Charging Stations */}
-                {model.stations.map(s => (
-                  // @ts-ignore
-                  <Overlay key={s.id} anchor={[s.position.x, s.position.y]} offset={[8, 8]}>
-                    <div className="flex flex-col items-center group">
-                      <div className="w-4 h-4 border border-terminal-text bg-black/60 flex items-center justify-center shadow-lg">
-                        <Zap className="w-2 h-2 text-terminal-text" />
-                      </div>
-                      <span className="text-xs uppercase bg-black/80 px-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                        {s.name}
-                      </span>
-                    </div>
-                  </Overlay>
-                ))}
-
-                {/* Drones */}
-                {drones.map(drone => (
-                  // @ts-ignore
-                  <Overlay key={drone.id} anchor={[drone.position.x, drone.position.y]} offset={[10, 10]}>
-                    <div
-                      className={cn(
-                        "flex flex-col items-center cursor-pointer transition-all hover:scale-110",
-                        selectedDrone === drone.id && "scale-125"
-                      )}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedDrone(drone.id);
-                        setContextMenu({ droneId: drone.id, pos: drone.position });
-                      }}
-                    >
-                      <div className="relative group">
-                        <div className={cn(
-                          "w-10 h-10 flex items-center justify-center relative z-10 transition-all duration-300",
-                          drone.status === DroneStatus.SCANNING && "animate-pulse",
-                          drone.battery < 15 && "filter drop-shadow-[0_0_8px_rgba(255,0,0,0.8)]"
-                        )}>
-                          <img 
-                            src="/drone_icon.png" 
-                            alt="Tactical Drone"
-                            className={cn("w-full h-full object-contain", drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200")}
-                            style={{ 
-                              transform: `rotate(${drone.target ? Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90 : 0}deg)` 
-                            }}
-                          />
+                  {/* Charging Stations */}
+                  {model.stations.map(s => (
+                    // @ts-ignore
+                    <Overlay key={s.id} anchor={[s.position.x, s.position.y]} offset={[8, 8]}>
+                      <div className="flex flex-col items-center group">
+                        <div className="w-4 h-4 border border-terminal-text bg-black/60 flex items-center justify-center shadow-lg">
+                          <Zap className="w-2 h-2 text-terminal-text" />
                         </div>
+                        <span className="text-xs uppercase bg-black/80 px-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                          {s.name}
+                        </span>
+                      </div>
+                    </Overlay>
+                  ))}
 
-                        {/* Low Battery Indicator Ring */}
-                        {drone.battery < 15 && (
-                           <div className="absolute -inset-2 border-2 border-red-500 border-dashed rounded-full animate-[spin_3s_linear_infinite] z-0 opacity-80" />
+                  {/* Drones */}
+                  {drones.filter(d => d.status !== DroneStatus.IDLE).map(drone => (
+                    // @ts-ignore
+                    <Overlay key={drone.id} anchor={[drone.position.x, drone.position.y]} offset={[10, 10]}>
+                      <div
+                        className={cn(
+                          "flex flex-col items-center cursor-pointer transition-all hover:scale-110",
+                          selectedDrone === drone.id && "scale-125"
                         )}
-                      </div>
-                      <span className="text-xs font-semibold font-bold bg-black/80 px-1 mt-1 border border-terminal-text/20 shadow-md z-20">
-                        {drone.id}
-                      </span>
-                    </div>
-                  </Overlay>
-                ))}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedDrone(drone.id);
+                          setContextMenu({ droneId: drone.id, pos: drone.position });
+                        }}
+                      >
+                        <div className="relative group">
+                          <div className={cn(
+                            "w-10 h-10 flex items-center justify-center relative z-10 transition-all duration-300",
+                            drone.status === DroneStatus.SCANNING && "animate-pulse",
+                            drone.battery < 15 && "filter drop-shadow-[0_0_8px_rgba(255,0,0,0.8)]"
+                          )}>
+                            <img
+                              src="/drone_icon.png"
+                              alt="Tactical Drone"
+                              className={cn("w-full h-full object-contain", drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200")}
+                              style={{
+                                transform: `rotate(${drone.target ? Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90 : 0}deg)`
+                              }}
+                            />
+                          </div>
 
-                {/* Context Menu */}
-                {contextMenu && (
-                  // @ts-ignore
-                  <Overlay anchor={[contextMenu.pos.x, contextMenu.pos.y]} offset={[-20, 40]}>
-                    <DroneContextMenu contextMenu={contextMenu} model={model} mapCenter={mapCenter} addLog={addLog} onClose={() => setContextMenu(null)} />
-                  </Overlay>
-                )}
-
-                {/* Survivors */}
-                {survivors.map(s => (
-                  // @ts-ignore
-                  <Overlay key={s.id} anchor={[s.lat, s.lng]} offset={[10, 10]}>
-                    <motion.div
-                      initial={{ scale: 0, opacity: 0 }}
-                      animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }}
-                      transition={{ repeat: Infinity, duration: 2 }}
-                      className="flex flex-col items-center"
-                    >
-                      <div className="w-4 h-4 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg">
-                        <Users className="w-2 h-2 text-white -rotate-45" />
+                          {/* Low Battery Indicator Ring */}
+                          {drone.battery < 15 && (
+                            <div className="absolute -inset-2 border-2 border-red-500 border-dashed rounded-full animate-[spin_3s_linear_infinite] z-0 opacity-80" />
+                          )}
+                        </div>
+                        <span className="text-xs font-semibold font-bold bg-black/80 px-1 mt-1 border border-terminal-text/20 shadow-md z-20">
+                          {drone.id}
+                        </span>
                       </div>
-                      <span className="text-xs font-bold text-red-500 bg-black/80 px-1 mt-1">SOS</span>
-                    </motion.div>
-                  </Overlay>
-                ))}
-              </Map>
-            </div>
+                    </Overlay>
+                  ))}
+
+                  {/* Context Menu */}
+                  {contextMenu && (
+                    // @ts-ignore
+                    <Overlay anchor={[contextMenu.pos.x, contextMenu.pos.y]} offset={[-20, 40]}>
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        className="bg-black/95 border border-terminal-text/30 p-1 rounded shadow-2xl backdrop-blur-md min-w-[120px] z-[100]"
+                        style={is3D ? { transform: 'rotateX(-45deg)' } : {}}
+                      >
+                        <div className="text-xs uppercase opacity-40 px-2 py-1 border-b border-terminal-text/10 mb-1">
+                          Unit {contextMenu.droneId} Actions
+                        </div>
+                        <button
+                          className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
+                          onClick={() => {
+                            const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+                            if (droneAgent) {
+                              // Manual dispatch to current map center
+                              droneAgent.status = DroneStatus.DISPATCHED;
+                              droneAgent.setTarget({ x: mapCenter[0], y: mapCenter[1] }, model);
+                              addLog(`Manual dispatch command sent to ${contextMenu.droneId} to coordinates ${mapCenter[0].toFixed(2)}, ${mapCenter[1].toFixed(2)}`, "INFO");
+                            }
+                            setContextMenu(null);
+                          }}
+                        >
+                          <Target className="w-3 h-3" /> Manual Dispatch
+                        </button>
+                        <button
+                          className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
+                          onClick={() => {
+                            const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+                            if (droneAgent) {
+                              droneAgent.status = DroneStatus.SCANNING;
+                              droneAgent.target = null;
+                              droneAgent.path = [];
+                              addLog(`Scanning protocol initiated for ${contextMenu.droneId}`, "INFO");
+                            }
+                            setContextMenu(null);
+                          }}
+                        >
+                          <Radio className="w-3 h-3" /> Scan Area
+                        </button>
+                        <button
+                          className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2 text-hazard"
+                          onClick={() => {
+                            const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+                            if (droneAgent && model.stations.length > 0) {
+                              const nearest = model.stations.reduce((prev, curr) =>
+                                Math.sqrt(Math.pow(droneAgent.pos.x - curr.position.x, 2) + Math.pow(droneAgent.pos.y - curr.position.y, 2)) <
+                                  Math.sqrt(Math.pow(droneAgent.pos.x - prev.position.x, 2) + Math.pow(droneAgent.pos.y - prev.position.y, 2)) ? curr : prev
+                              );
+                              droneAgent.status = DroneStatus.RETURNING;
+                              droneAgent.setTarget(nearest.position, model);
+                              addLog(`Return to base command sent to ${contextMenu.droneId}. Heading to ${nearest.name}.`, "WARNING");
+                            }
+                            setContextMenu(null);
+                          }}
+                        >
+                          <RotateCcw className="w-3 h-3" /> Return to Base
+                        </button>
+                        <button
+                          className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2 text-red-500"
+                          onClick={() => {
+                            const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+                            if (droneAgent) {
+                              droneAgent.status = DroneStatus.STUCK as any;
+                              droneAgent.target = null;
+                              droneAgent.path = [];
+                              addLog(`CRITICAL: Drone ${contextMenu.droneId} communication lost. Probable structural entanglement or crash.`, "CRITICAL");
+                              triggerAnalysis();
+                            }
+                            setContextMenu(null);
+                          }}
+                        >
+                          <AlertTriangle className="w-3 h-3" /> Simulate Stuck Action
+                        </button>
+                        <button
+                          className="w-full text-center mt-1 py-1 text-xs opacity-50 hover:opacity-100"
+                          onClick={() => setContextMenu(null)}
+                        >
+                          Close
+                        </button>
+                      </motion.div>
+                    </Overlay>
+                  )}
+
+                  {/* Survivors */}
+                  {survivors.map(s => (
+                    // @ts-ignore
+                    <Overlay key={s.id} anchor={[s.lat, s.lng]} offset={[10, 10]}>
+                      <motion.div
+                        initial={{ scale: 0, opacity: 0 }}
+                        animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }}
+                        transition={{ repeat: Infinity, duration: 2 }}
+                        className="flex flex-col items-center"
+                      >
+                        <div className="w-4 h-4 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg">
+                          <Users className="w-2 h-2 text-white -rotate-45" />
+                        </div>
+                        <span className="text-xs font-bold text-red-500 bg-black/80 px-1 mt-1">SOS</span>
+                      </motion.div>
+                    </Overlay>
+                  ))}
+                </Map>
+              </div>
             )}
 
             {/* Mapbox 3D view */}
             {is3D && (
-            <div className="absolute inset-0">
-              <MapboxView
-                center={mapCenter}
-                zoom={mapZoom}
-                mapType={mapType}
-                drones={drones}
-                survivors={survivors}
-                obstacles={model.obstacles}
-                renderContextMenu={(droneId, pos, container, onClose) => {
-                  createRoot(container).render(
-                    <DroneContextMenu
-                      contextMenu={{ droneId, pos }}
-                      model={model}
-                      mapCenter={mapCenter}
-                      addLog={addLog}
-                      onClose={() => { onClose(); setContextMenu(null); }}
-                    />
-                  );
-                }}
-                
-                onDroneClick={(droneId, pos) => {
-                  setSelectedDrone(droneId);
-                  setContextMenu({ droneId, pos });
-                }}
-                onMove={(center, zoom) => {
-                  setMapCenter(center);
-                  setMapZoom(zoom);
-                }}
-              />
-            </div>
-          )}
+              <div className="absolute inset-0">
+                <MapboxView
+                  center={mapCenter}
+                  zoom={mapZoom}
+                  mapType={mapType}
+                  drones={drones}
+                  survivors={survivors}
+                  obstacles={model.obstacles}
+                  renderContextMenu={(droneId, pos, container, onClose) => {
+                    createRoot(container).render(
+                      <DroneContextMenu
+                        contextMenu={{ droneId, pos }}
+                        model={model}
+                        mapCenter={mapCenter}
+                        addLog={addLog}
+                        onClose={() => { onClose(); setContextMenu(null); }}
+                      />
+                    );
+                  }}
+
+                  onDroneClick={(droneId, pos) => {
+                    setSelectedDrone(droneId);
+                    setContextMenu({ droneId, pos });
+                  }}
+                  onMove={(center, zoom) => {
+                    setMapCenter(center);
+                    setMapZoom(zoom);
+                  }}
+                />
+              </div>
+            )}
           </div>
 
         </section>
