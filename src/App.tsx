@@ -1113,21 +1113,21 @@ export default function App() {
 
                   <div className="space-y-1">
                     {GLOBAL_LOCATIONS.map(loc => (
-                        <button
-                          key={loc.name}
-                          onClick={() => {
-                            animateMap(loc.lat, loc.lng, loc.zoom);
-                            addLog(`Global redeployment: Sector ${loc.name} selected.`, "INFO");
-                          }}
-                          className="w-full p-3 flex items-center justify-between border border-terminal-text/10 rounded hover:bg-terminal-text/10 hover:border-terminal-text/30 transition-all group"
-                        >
-                          <div className="flex flex-col items-start">
+                      <button
+                        key={loc.name}
+                        onClick={() => {
+                          animateMap(loc.lat, loc.lng, loc.zoom);
+                          addLog(`Global redeployment: Sector ${loc.name} selected.`, "INFO");
+                        }}
+                        className="w-full p-3 flex items-center justify-between border border-terminal-text/10 rounded hover:bg-terminal-text/10 hover:border-terminal-text/30 transition-all group"
+                      >
+                        <div className="flex flex-col items-start">
                           <span className="text-xs font-bold group-hover:text-terminal-text transition-colors">{loc.name}</span>
                           <span className="text-sm font-semibold opacity-40 uppercase tracking-tighter">{loc.region}</span>
                         </div>
-                          <ChevronRight className="w-4 h-4 opacity-20 group-hover:opacity-100 transition-all group-hover:translate-x-1" />
-                        </button>
-                      ))}
+                        <ChevronRight className="w-4 h-4 opacity-20 group-hover:opacity-100 transition-all group-hover:translate-x-1" />
+                      </button>
+                    ))}
                   </div>
                 </motion.div>
               )}
@@ -1289,7 +1289,7 @@ export default function App() {
                         const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
                         return (
                           // @ts-ignore
-                          <Overlay key={`history-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                          <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
                             <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
                               <line
                                 x1="0"
