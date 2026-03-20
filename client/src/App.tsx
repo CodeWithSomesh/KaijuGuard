@@ -43,6 +43,10 @@ import { cn } from './lib/utils';
 import { getTacticalAnalysis } from './services/adkService';
 import { Map, Marker, Overlay, ZoomControl } from 'pigeon-maps';
 import { DisasterModel, DroneAgent, SurvivorAgent } from './simulation/engine';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
+import { createRoot } from 'react-dom/client';
+import './services/mapboxService';
 
 const MALAYSIA_STATES = [
   { name: "Perlis", lat: 6.4444, lng: 100.2048 },
@@ -173,6 +177,450 @@ const GLOBAL_LOCATIONS = Object.entries(GLOBAL_REGIONS).map(([name, data]) => ({
   region: name === "Malaysia" ? "SE Asia" : name === "Japan" ? "East Asia" : name === "USA" ? "North America" : name === "Brazil" ? "South America" : name === "Australia" ? "Oceania" : name === "India" ? "South Asia" : "Europe"
 }));
 
+const MAPBOX_STYLE_MAP: Record<string, string> = {
+  dark: 'mapbox://styles/mapbox/dark-v11',
+  satellite: 'mapbox://styles/mapbox/satellite-v9',
+  hybrid: 'mapbox://styles/mapbox/satellite-streets-v12',
+  tactical: 'mapbox://styles/mapbox/streets-v12',
+  terrain: 'mapbox://styles/mapbox/outdoors-v12',
+};
+
+function MapGroup({ children, ...rest }: React.HTMLAttributes<HTMLDivElement>) {
+  return <div>{children}</div>;
+}
+
+function MapboxView({
+  center,
+  zoom,
+  mapType,
+  drones,
+  survivors,
+  obstacles,
+  onDroneClick,
+  onMove,
+  renderContextMenu,
+}: {
+  center: [number, number];
+  zoom: number;
+  mapType: string;
+  drones: Drone[];
+  survivors: Survivor[];
+  obstacles: Obstacle[];
+  onDroneClick: (droneId: string, pos: { x: number; y: number }) => void;
+  onMove: (center: [number, number], zoom: number) => void;
+  renderContextMenu: (droneId: string, pos: { x: number; y: number }, container: HTMLElement, onClose: () => void) => void;
+}) {
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const isSyncing = useRef(false);
+  const markerMapRef = useRef<globalThis.Map<string, mapboxgl.Marker>>(new globalThis.Map());
+  const rootMapRef = useRef<globalThis.Map<string, ReturnType<typeof createRoot>>>(new globalThis.Map());
+
+  useEffect(() => {
+    mapRef.current = new mapboxgl.Map({
+      style: MAPBOX_STYLE_MAP[mapType] ?? MAPBOX_STYLE_MAP.dark,
+      config: { basemap: { theme: 'monochrome' } },
+      center: [center[1], center[0]],
+      zoom,
+      pitch: 45,
+      bearing: -17.6,
+      container: 'mapbox-3d-container',
+      antialias: true,
+    });
+
+     mapRef.current.on('style.load', () => {
+      // Inject popup styles
+      if (!document.getElementById('mapbox-popup-style')) {
+        const s = document.createElement('style');
+        s.id = 'mapbox-popup-style';
+        s.textContent = `
+          .mapboxgl-popup-content { background: transparent !important; padding: 0 !important; box-shadow: none !important; border-radius: 0 !important; }
+          .mapboxgl-popup-tip { border-top-color: rgba(0,255,136,0.3) !important; border-bottom-color: rgba(0,255,136,0.3) !important; }
+          .mapboxgl-popup-close-button {
+            color: #00ff88 !important;
+            font-size: 14px !important;
+            font-family: 'Courier New', monospace !important;
+            font-weight: bold !important;
+            padding: 4px 8px !important;
+            background: rgba(0,0,0,0.8) !important;
+            border: 1px solid rgba(0,255,136,0.3) !important;
+            border-radius: 0 !important;
+            top: 6px !important;
+            right: 6px !important;
+            line-height: 1 !important;
+          }
+          .mapboxgl-popup-close-button:hover { background: rgba(0,255,136,0.1) !important; }
+        `;
+        document.head.appendChild(s);
+      }
+
+      // 3D terrain
+      mapRef.current!.addSource('mapbox-dem', {
+        type: 'raster-dem',
+        url: 'mapbox://mapbox.terrain-rgb',
+        tileSize: 512,
+        maxzoom: 14,
+      });
+      mapRef.current!.setTerrain({ source: 'mapbox-dem', exaggeration: 1.5 });
+
+      // 3D buildings for ALL styles including satellite
+      if (!mapRef.current!.getLayer('add-3d-buildings')) {
+        const layers = mapRef.current!.getStyle().layers;
+        const labelLayerId = layers.find(
+          (l) => l.type === 'symbol' && (l.layout as any)?.['text-field']
+        )?.id;
+
+        if (mapRef.current!.getSource('composite')) {
+          mapRef.current!.addLayer({
+            id: 'add-3d-buildings',
+            source: 'composite',
+            'source-layer': 'building',
+            filter: ['==', 'extrude', 'true'],
+            type: 'fill-extrusion',
+            minzoom: 15,
+            paint: {
+              'fill-extrusion-color': [
+                'case',
+                ['boolean', ['feature-state', 'hover'], false],
+                '#00ff88',
+                '#aaa'
+              ],
+              'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'height']],
+              'fill-extrusion-base': ['interpolate', ['linear'], ['zoom'], 15, 0, 15.05, ['get', 'min_height']],
+              'fill-extrusion-opacity': 0.7,
+            },
+          }, labelLayerId);
+        }
+      }
+
+      // Hover highlight state
+      let hoveredBuildingId: string | number | null = null;
+      mapRef.current!.on('mousemove', 'add-3d-buildings', (e) => {
+        if (e.features && e.features.length > 0) {
+          if (hoveredBuildingId !== null) {
+            mapRef.current!.setFeatureState(
+              { source: 'composite', sourceLayer: 'building', id: hoveredBuildingId },
+              { hover: false }
+            );
+          }
+          hoveredBuildingId = e.features[0].id ?? null;
+          if (hoveredBuildingId !== null) {
+            mapRef.current!.setFeatureState(
+              { source: 'composite', sourceLayer: 'building', id: hoveredBuildingId },
+              { hover: true }
+            );
+          }
+          mapRef.current!.getCanvas().style.cursor = 'pointer';
+        }
+      });
+
+      mapRef.current!.on('mouseleave', 'add-3d-buildings', () => {
+        if (hoveredBuildingId !== null) {
+          mapRef.current!.setFeatureState(
+            { source: 'composite', sourceLayer: 'building', id: hoveredBuildingId },
+            { hover: false }
+          );
+        }
+        hoveredBuildingId = null;
+        mapRef.current!.getCanvas().style.cursor = '';
+      });
+
+      // Click for building info — query both building and poi layers
+      mapRef.current!.on('click', 'add-3d-buildings', (e) => {
+        if (!e.features || e.features.length === 0) return;
+        const f = e.features[0].properties;
+
+        // Also query nearby POI for name/category
+        const poiFeatures = mapRef.current!.queryRenderedFeatures(e.point, {
+          layers: ['poi-label']
+        });
+        const poi = poiFeatures[0]?.properties;
+
+        const row = (label: string, val: any) =>
+          val ? `<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:1px solid rgba(0,255,136,0.1)"><span style="opacity:0.5">${label}</span><span style="color:#fff">${val}</span></div>` : '';
+
+        const floors = f?.height ? Math.round(Number(f.height) / 3.5) : null;
+        const category = poi?.category_en || poi?.class || poi?.type || null;
+        const name = poi?.name || null;
+
+        new mapboxgl.Popup({ closeButton: true, maxWidth: '240px', className: 'kaiju-popup' })
+          .setLngLat(e.lngLat)
+          .setHTML(`
+            <div style="font-family:'Courier New',monospace;font-size:11px;color:#00ff88;background:#000000;padding:10px 12px;border:1px solid rgba(0,255,136,0.3);min-width:200px;letter-spacing:0.03em;">
+              <div style="font-weight:bold;margin-bottom:8px;font-size:12px;letter-spacing:0.1em;text-transform:uppercase;border-bottom:1px solid rgba(0,255,136,0.2);padding-bottom:6px;">⬡ Structure Data</div>
+              ${row('Name', name)}
+              ${row('Category', category)}
+              ${row('Type', f?.type)}
+              ${row('Height', f?.height ? `${f.height}m` : null)}
+              ${row('Est. Floors', floors)}
+              ${row('Min Height', f?.min_height ? `${f.min_height}m` : null)}
+              ${row('Underground', f?.underground === 'true' ? 'Yes' : null)}
+            </div>
+          `)
+          .addTo(mapRef.current!);
+      });
+    });
+
+    return () => {
+      markerMapRef.current.forEach(m => m.remove());
+      rootMapRef.current.forEach(r => r.unmount());
+      markerMapRef.current.clear();
+      rootMapRef.current.clear();
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  // Sync map style when mapType changes
+  useEffect(() => {
+    if (!mapRef.current) return;
+    mapRef.current.setStyle(MAPBOX_STYLE_MAP[mapType] ?? MAPBOX_STYLE_MAP.dark);
+  }, [mapType]);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+    const onMoveEnd = () => {
+      if (isSyncing.current) return;
+      const c = map.getCenter();
+      onMove([c.lat, c.lng], map.getZoom());
+    };
+    map.on('moveend', onMoveEnd);
+    return () => { map.off('moveend', onMoveEnd); };
+  }, []);
+
+  useEffect(() => {
+    if (!mapRef.current) return;
+    isSyncing.current = true;
+    mapRef.current.easeTo({
+      center: [center[1], center[0]],
+      zoom,
+      duration: 1000,
+    });
+    const timer = setTimeout(() => { isSyncing.current = false; }, 1100);
+    return () => clearTimeout(timer);
+  }, [center, zoom]);
+
+  // Render markers for drones, survivors, obstacles
+  useEffect(() => {
+    if (!mapRef.current) return;
+
+    const currentIds = new Set([
+      ...drones.map(d => `drone-${d.id}`),
+      ...survivors.map(s => `survivor-${s.id}`),
+      ...obstacles.map(o => `obs-${o.id}`),
+    ]);
+
+    // Remove stale markers
+    markerMapRef.current.forEach((marker, id) => {
+      if (!currentIds.has(id)) {
+        marker.remove();
+        rootMapRef.current.get(id)?.unmount();
+        markerMapRef.current.delete(id);
+        rootMapRef.current.delete(id);
+      }
+    });
+
+    // Drones — update position only if already exists
+    drones.forEach(drone => {
+      const id = `drone-${drone.id}`;
+      const existing = markerMapRef.current.get(id);
+      if (existing) {
+        existing.setLngLat([drone.position.y, drone.position.x]);
+        return;
+      }
+      const el = document.createElement('div');
+      el.style.cssText = 'cursor:pointer;';
+      const root = createRoot(el);
+      rootMapRef.current.set(id, root);
+      root.render(
+        <div className="flex flex-col items-center cursor-pointer">
+          <div className="relative group">
+            {/* Shadow layer — matches 2D */}
+            <div className="absolute inset-0 translate-y-[2px] bg-black/40 blur-[1px] transform rotate-45" />
+
+            <div className={cn(
+              "w-10 h-10 flex items-center justify-center relative z-10 transition-all duration-300",
+              drone.status === DroneStatus.SCANNING && "animate-pulse",
+              drone.battery < 15 && "filter drop-shadow-[0_0_8px_rgba(255,0,0,0.8)]"
+            )}>
+              <img
+                src="/drone_icon.png"
+                alt="Tactical Drone"
+                className={cn(
+                  "w-full h-full object-contain",
+                  drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200"
+                )}
+                style={{
+                  transform: `rotate(${drone.target
+                    ? Math.atan2(
+                        drone.target.y - drone.position.y,
+                        drone.target.x - drone.position.x
+                      ) * 180 / Math.PI + 90
+                    : 0}deg)`
+                }}
+              />
+            </div>
+
+            {/* Low battery ring — matches 2D */}
+            {drone.battery < 15 && (
+              <div className="absolute -inset-2 border-2 border-red-500 border-dashed rounded-full animate-[spin_3s_linear_infinite] z-0 opacity-80" />
+            )}
+          </div>
+
+          <span className="text-xs font-semibold font-bold bg-black/80 px-1 mt-1 border border-terminal-text/20 shadow-md z-20">
+            {drone.id}
+          </span>
+        </div>
+      );
+      const marker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat([drone.position.y, drone.position.x])
+        .addTo(mapRef.current!);
+
+      marker.getElement().addEventListener('click', (e) => {
+        e.stopPropagation();
+        const lngLat = marker.getLngLat();
+        onDroneClick(drone.id, { x: lngLat.lat, y: lngLat.lng });
+        document.querySelectorAll('.drone-menu-popup').forEach(p => p.remove());
+        const container = document.createElement('div');
+        const popup = new mapboxgl.Popup({ closeButton: false, anchor: 'top', offset: 20 })
+          .setLngLat(lngLat)
+          .setDOMContent(container)
+          .addTo(mapRef.current!);
+        popup.getElement().classList.add('drone-menu-popup');
+        renderContextMenu(drone.id, { x: lngLat.lat, y: lngLat.lng }, container, () => { popup.remove(); });
+      });
+
+      markerMapRef.current.set(id, marker);
+    });
+
+    // Survivors — only create once, they don't move
+    survivors.forEach(s => {
+      const id = `survivor-${s.id}`;
+      if (markerMapRef.current.has(id)) return;
+      const el = document.createElement('div');
+      const root = createRoot(el);
+      rootMapRef.current.set(id, root);
+      root.render(
+        <motion.div animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }} transition={{ repeat: Infinity, duration: 2 }} className="flex flex-col items-center">
+          <div className="w-4 h-4 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg">
+            <Users className="w-2 h-2 text-white -rotate-45" />
+          </div>
+          <span className="text-xs font-bold text-red-500 bg-black/80 px-1 mt-1">SOS</span>
+        </motion.div>
+      );
+      markerMapRef.current.set(id, new mapboxgl.Marker({ element: el, anchor: 'top' })
+        .setLngLat([s.lng, s.lat])
+        .addTo(mapRef.current!));
+    });
+
+    // Obstacles — only create once, they don't move
+    obstacles.forEach(obs => {
+      const id = `obs-${obs.id}`;
+      if (markerMapRef.current.has(id)) return;
+      const el = document.createElement('div');
+      const root = createRoot(el);
+      rootMapRef.current.set(id, root);
+      root.render(
+        <div className="relative flex items-center justify-center pointer-events-none">
+          <div className={cn("rounded-full border-2 flex items-center justify-center", obs.type === "NO_FLY_ZONE" ? "bg-alert/10 border-alert/40" : "bg-warning/10 border-warning/40")} style={{ width: 80, height: 80 }}>
+            <div className="flex flex-col items-center">
+              {obs.type === "NO_FLY_ZONE" ? <ShieldAlert className="w-3 h-3 text-alert" /> : <CloudLightning className="w-3 h-3 text-warning" />}
+              <span className="text-[6px] font-bold uppercase tracking-tighter opacity-60">{obs.type === "NO_FLY_ZONE" ? "NFZ" : "HAZARD"}</span>
+            </div>
+          </div>
+        </div>
+      );
+      markerMapRef.current.set(id, new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat([obs.position.y, obs.position.x])
+        .addTo(mapRef.current!));
+    });
+
+  }, [drones, survivors, obstacles]);
+
+  return <div id="mapbox-3d-container" style={{ width: '100%', height: '100%' }} />;
+}
+
+function DroneContextMenu({
+  contextMenu,
+  model,
+  mapCenter,
+  addLog,
+  onClose,
+}: {
+  contextMenu: { droneId: string; pos: { x: number; y: number } };
+  model: DisasterModel;
+  mapCenter: [number, number];
+  addLog: (msg: string, type?: any) => void;
+  onClose: () => void;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.9, y: 10 }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      className="bg-black/95 border border-terminal-text/30 p-1 rounded shadow-2xl backdrop-blur-md min-w-[120px] z-[100] font-mono"
+    >
+      <div className="text-xs uppercase opacity-40 px-2 py-1 border-b border-terminal-text/10 mb-1">
+        Unit {contextMenu.droneId} Actions
+      </div>
+      <button
+        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
+        onClick={() => {
+          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+          if (droneAgent) {
+            // Manual dispatch to current map center
+            droneAgent.status = DroneStatus.DISPATCHED;
+            droneAgent.setTarget({ x: mapCenter[0], y: mapCenter[1] }, model);
+            addLog(`Manual dispatch command sent to ${contextMenu.droneId} to coordinates ${mapCenter[0].toFixed(2)}, ${mapCenter[1].toFixed(2)}`, "INFO");
+          }
+          onClose();
+        }}
+      >
+        <Target className="w-3 h-3" /> Manual Dispatch
+      </button>
+      <button
+        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
+        onClick={() => {
+          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+          if (droneAgent) {
+            droneAgent.status = DroneStatus.SCANNING;
+            droneAgent.target = null;
+            droneAgent.path = [];
+            addLog(`Scanning protocol initiated for ${contextMenu.droneId}`, "INFO");
+          }
+          onClose();
+        }}
+      >
+        <Radio className="w-3 h-3" /> Scan Area
+      </button>
+      <button
+        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2 text-hazard"
+        onClick={() => {
+          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
+          if (droneAgent && model.stations.length > 0) {
+            const nearest = model.stations.reduce((prev, curr) => {
+              const distPrev = Math.sqrt(Math.pow(droneAgent.pos.x - prev.position.x, 2) + Math.pow(droneAgent.pos.y - prev.position.y, 2));
+              const distCurr = Math.sqrt(Math.pow(droneAgent.pos.x - curr.position.x, 2) + Math.pow(droneAgent.pos.y - curr.position.y, 2));
+              return distCurr < distPrev ? curr : prev;
+            });
+            droneAgent.status = DroneStatus.RETURNING;
+            droneAgent.setTarget(nearest.position, model);
+            addLog(`Return to base command sent to ${contextMenu.droneId}. Heading to ${nearest.name}.`, "WARNING");
+          }
+          onClose();
+        }}
+      >
+        <RotateCcw className="w-3 h-3" /> Return to Base
+      </button>
+      <button
+        className="w-full text-center mt-1 py-1 text-xs opacity-50 hover:opacity-100"
+        onClick={onClose}
+      >
+        Close
+      </button>
+    </motion.div>
+  );
+}
+
 export default function App() {
   const [isMounted, setIsMounted] = useState(false);
   useEffect(() => setIsMounted(true), []);
@@ -239,6 +687,8 @@ export default function App() {
     const interval = setInterval(() => setCurrentTime(new Date().toISOString()), 1000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => setIsMounted(true), []);
 
   const getCurrentRegion = () => {
     let currentRegionName = "Malaysia";
@@ -891,19 +1341,9 @@ export default function App() {
 
           {/* Map Visualization */}
           <div
-            className="flex-1 relative bg-zinc-900 overflow-hidden"
-            style={is3D ? {
-              perspective: '1000px',
-              perspectiveOrigin: '50% 100%'
-            } : {}}
-          >
-            <div
-              className="w-full h-full transition-transform duration-700 ease-in-out"
-              style={is3D ? {
-                transform: 'rotateX(45deg) translateY(-10%) scale(1.2)',
-                transformOrigin: '50% 100%'
-              } : {}}
-            >
+            className="flex-1 relative bg-zinc-900 overflow-hidden">
+            {!is3D && isMounted && (
+            <div className="w-full h-full">
               <Map
                 center={mapCenter}
                 zoom={mapZoom}
@@ -928,7 +1368,7 @@ export default function App() {
                 {getCurrentRegion().states.map(state => (
                   // @ts-ignore
                   <Overlay key={`label-${state.name}`} anchor={[state.lat, state.lng]}>
-                    <div className="flex flex-col items-center pointer-events-none" style={is3D ? { transform: 'rotateX(-45deg)' } : {}}>
+                    <div className="flex flex-col items-center pointer-events-none">
                       <div className="w-1 h-1 bg-white/40 rounded-full mb-1" />
                       <span className="text-base font-semibold font-display font-bold text-white/60 uppercase tracking-widest whitespace-nowrap drop-shadow-md">
                         {state.name}
@@ -937,13 +1377,38 @@ export default function App() {
                   </Overlay>
                 ))}
 
-
+                {/* History Lines */}
+                {drones.map(drone => (
+                  <MapGroup key={`history-group-${drone.id}`}>
+                    {drone.history.slice(1).map((pos, idx) => {
+                      const prevPos = drone.history[idx];
+                      const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
+                      return (
+                        // @ts-ignore
+                        <Overlay key={`history-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                          <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
+                            <line
+                              x1="0"
+                              y1="0"
+                              x2={offset.dx}
+                              y2={offset.dy}
+                              stroke="#00ff88"
+                              strokeWidth="1.5"
+                              strokeOpacity="0.5"
+                              className="filter drop-shadow-[0_0_2px_#00ff88]"
+                            />
+                          </svg>
+                        </Overlay>
+                      );
+                    })}
+                  </MapGroup>
+                ))}
 
                 {/* Obstacles */}
                 {model.obstacles.map(obs => (
                   // @ts-ignore
                   <Overlay key={obs.id} anchor={[obs.position.x, obs.position.y]}>
-                    <div className="relative flex items-center justify-center pointer-events-none" style={is3D ? { transform: 'rotateX(-45deg)' } : {}}>
+                    <div className="relative flex items-center justify-center pointer-events-none">
                       <motion.div
                         initial={{ scale: 0 }}
                         animate={{ scale: 1 }}
@@ -968,13 +1433,14 @@ export default function App() {
                 ))}
 
                 {/* Trajectory Paths (A* Waypoints) */}
-                {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).flatMap(drone => {
+                {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).map(drone => {
                   const droneAgent = model.agents.find(a => a.id === drone.id) as DroneAgent;
-                  if (!droneAgent || droneAgent.path.length === 0) return [];
+                  if (!droneAgent || droneAgent.path.length === 0) return null;
 
                   const fullPath = [{ x: drone.position.x, y: drone.position.y }, ...droneAgent.path];
 
-                  return fullPath.slice(1).map((pos, idx) => {
+                  return (<MapGroup key={`path-group-${drone.id}`}>
+                  {fullPath.slice(1).map((pos, idx) => {
                     const prevPos = fullPath[idx];
                     const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
                     return (
@@ -995,14 +1461,16 @@ export default function App() {
                         </svg>
                       </Overlay>
                     );
-                  });
+                  })}
+                </MapGroup>
+              );
                 })}
 
                 {/* Charging Stations */}
                 {model.stations.map(s => (
                   // @ts-ignore
                   <Overlay key={s.id} anchor={[s.position.x, s.position.y]} offset={[8, 8]}>
-                    <div className="flex flex-col items-center group" style={is3D ? { transform: 'rotateX(-45deg)' } : {}}>
+                    <div className="flex flex-col items-center group">
                       <div className="w-4 h-4 border border-terminal-text bg-black/60 flex items-center justify-center shadow-lg">
                         <Zap className="w-2 h-2 text-terminal-text" />
                       </div>
@@ -1022,7 +1490,6 @@ export default function App() {
                         "flex flex-col items-center cursor-pointer transition-all hover:scale-110",
                         selectedDrone === drone.id && "scale-125"
                       )}
-                      style={is3D ? { transform: 'rotateX(-45deg) translateZ(20px)' } : {}}
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelectedDrone(drone.id);
@@ -1061,70 +1528,7 @@ export default function App() {
                 {contextMenu && (
                   // @ts-ignore
                   <Overlay anchor={[contextMenu.pos.x, contextMenu.pos.y]} offset={[-20, 40]}>
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.9, y: 10 }}
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      className="bg-black/95 border border-terminal-text/30 p-1 rounded shadow-2xl backdrop-blur-md min-w-[120px] z-[100]"
-                      style={is3D ? { transform: 'rotateX(-45deg)' } : {}}
-                    >
-                      <div className="text-xs uppercase opacity-40 px-2 py-1 border-b border-terminal-text/10 mb-1">
-                        Unit {contextMenu.droneId} Actions
-                      </div>
-                      <button
-                        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
-                        onClick={() => {
-                          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
-                          if (droneAgent) {
-                            // Manual dispatch to current map center
-                            droneAgent.status = DroneStatus.DISPATCHED;
-                            droneAgent.setTarget({ x: mapCenter[0], y: mapCenter[1] }, model);
-                            addLog(`Manual dispatch command sent to ${contextMenu.droneId} to coordinates ${mapCenter[0].toFixed(2)}, ${mapCenter[1].toFixed(2)}`, "INFO");
-                          }
-                          setContextMenu(null);
-                        }}
-                      >
-                        <Target className="w-3 h-3" /> Manual Dispatch
-                      </button>
-                      <button
-                        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2"
-                        onClick={() => {
-                          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
-                          if (droneAgent) {
-                            droneAgent.status = DroneStatus.SCANNING;
-                            droneAgent.target = null;
-                            droneAgent.path = [];
-                            addLog(`Scanning protocol initiated for ${contextMenu.droneId}`, "INFO");
-                          }
-                          setContextMenu(null);
-                        }}
-                      >
-                        <Radio className="w-3 h-3" /> Scan Area
-                      </button>
-                      <button
-                        className="w-full text-left px-2 py-1.5 text-sm font-semibold hover:bg-terminal-text/20 transition-colors uppercase font-bold flex items-center gap-2 text-hazard"
-                        onClick={() => {
-                          const droneAgent = model.agents.find(a => a.id === contextMenu.droneId) as DroneAgent;
-                          if (droneAgent && model.stations.length > 0) {
-                            const nearest = model.stations.reduce((prev, curr) =>
-                              Math.sqrt(Math.pow(droneAgent.pos.x - curr.position.x, 2) + Math.pow(droneAgent.pos.y - curr.position.y, 2)) <
-                                Math.sqrt(Math.pow(droneAgent.pos.x - prev.position.x, 2) + Math.pow(droneAgent.pos.y - prev.position.y, 2)) ? curr : prev
-                            );
-                            droneAgent.status = DroneStatus.RETURNING;
-                            droneAgent.setTarget(nearest.position, model);
-                            addLog(`Return to base command sent to ${contextMenu.droneId}. Heading to ${nearest.name}.`, "WARNING");
-                          }
-                          setContextMenu(null);
-                        }}
-                      >
-                        <RotateCcw className="w-3 h-3" /> Return to Base
-                      </button>
-                      <button
-                        className="w-full text-center mt-1 py-1 text-xs opacity-50 hover:opacity-100"
-                        onClick={() => setContextMenu(null)}
-                      >
-                        Close
-                      </button>
-                    </motion.div>
+                    <DroneContextMenu contextMenu={contextMenu} model={model} mapCenter={mapCenter} addLog={addLog} onClose={() => setContextMenu(null)} />
                   </Overlay>
                 )}
 
@@ -1137,7 +1541,6 @@ export default function App() {
                       animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }}
                       transition={{ repeat: Infinity, duration: 2 }}
                       className="flex flex-col items-center"
-                      style={is3D ? { transform: 'rotateX(-45deg)' } : {}}
                     >
                       <div className="w-4 h-4 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg">
                         <Users className="w-2 h-2 text-white -rotate-45" />
@@ -1148,6 +1551,41 @@ export default function App() {
                 ))}
               </Map>
             </div>
+            )}
+
+            {/* Mapbox 3D view */}
+            {is3D && (
+            <div className="absolute inset-0">
+              <MapboxView
+                center={mapCenter}
+                zoom={mapZoom}
+                mapType={mapType}
+                drones={drones}
+                survivors={survivors}
+                obstacles={model.obstacles}
+                renderContextMenu={(droneId, pos, container, onClose) => {
+                  createRoot(container).render(
+                    <DroneContextMenu
+                      contextMenu={{ droneId, pos }}
+                      model={model}
+                      mapCenter={mapCenter}
+                      addLog={addLog}
+                      onClose={() => { onClose(); setContextMenu(null); }}
+                    />
+                  );
+                }}
+                
+                onDroneClick={(droneId, pos) => {
+                  setSelectedDrone(droneId);
+                  setContextMenu({ droneId, pos });
+                }}
+                onMove={(center, zoom) => {
+                  setMapCenter(center);
+                  setMapZoom(zoom);
+                }}
+              />
+            </div>
+          )}
           </div>
 
         </section>
