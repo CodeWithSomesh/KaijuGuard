@@ -681,6 +681,10 @@ export default function App() {
   const [rightTab, setRightTab] = useState<'analytics' | 'logs'>('analytics');
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState("");
+  const [regionSearch, setRegionSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<{ name: string; lat: number; lng: number; zoom?: number; region?: string }[]>([]);
+  const [selectedRegion, setSelectedRegion] = useState<string | null>(null);
+  const [showAllResults, setShowAllResults] = useState(false);
 
   useEffect(() => {
     setCurrentTime(new Date().toISOString());
@@ -1023,6 +1027,32 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    if (!regionSearch) { setSearchResults([]); return; }
+    if (regionSearch.length < 3) return;
+    const timer = setTimeout(async () => {
+      const selectedRegionData = selectedRegion ? GLOBAL_REGIONS[selectedRegion] : null;
+      const bboxQuery = selectedRegionData
+        ? `&bbox=${selectedRegionData.lng - 10},${selectedRegionData.lat - 10},${selectedRegionData.lng + 10},${selectedRegionData.lat + 10}`
+        : '';
+      const res = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(regionSearch)}&limit=10${bboxQuery}`);
+      const data = await res.json();
+      const results = data.features.map((f: any) => ({
+        name: [f.properties.name, f.properties.city, f.properties.country].filter(Boolean).join(', '),
+        lat: f.geometry.coordinates[1],
+        lng: f.geometry.coordinates[0],
+      }));
+      setSearchResults(selectedRegionData
+        ? results.filter((r: any) =>
+            r.lat >= selectedRegionData.lat - 10 && r.lat <= selectedRegionData.lat + 10 &&
+            r.lng >= selectedRegionData.lng - 10 && r.lng <= selectedRegionData.lng + 10
+          )
+        : results
+      );
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [regionSearch, selectedRegion]);
+
   if (!isMounted) {
     return <div className="h-screen w-screen bg-black flex items-center justify-center text-[#00ff88] font-mono tracking-widest text-sm animate-pulse">INITIALIZING KAIJUGUARD PROTOCOLS...</div>;
   }
@@ -1198,32 +1228,132 @@ export default function App() {
                   exit={{ opacity: 0, x: 20 }}
                   className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar"
                 >
+                  {/* Header + Search */}
                   <div className="mb-6 p-4 bg-terminal-text/5 border border-terminal-text/20 rounded">
                     <h3 className="text-xs font-bold uppercase mb-2 flex items-center gap-2">
                       <Globe className="w-4 h-4" /> Global Monitor
                     </h3>
+                    <div className="relative mb-2">
+                      <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 opacity-40" />
+                      <input
+                        type="text"
+                        placeholder="Search location..."
+                        value={regionSearch}
+                        onChange={(e) => setRegionSearch(e.target.value)}
+                        className="w-full bg-black/40 border border-terminal-text/20 rounded px-7 py-1.5 text-xs outline-none focus:border-terminal-text/60 placeholder:opacity-30 font-mono"
+                      />
+                      {regionSearch && (
+                        <button
+                          onClick={() => { setRegionSearch(''); setSearchResults([]); }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 opacity-40 hover:opacity-100 transition-opacity text-xs"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
                     <p className="text-base font-semibold opacity-60 leading-relaxed">
                       Select a sector to redeploy KaijuGuard assets. High-altitude transit will be initiated automatically.
                     </p>
                   </div>
 
-                  <div className="space-y-1">
-                    {GLOBAL_LOCATIONS.map(loc => (
-                      <button
-                        key={loc.name}
-                        onClick={() => {
-                          animateMap(loc.lat, loc.lng, loc.zoom);
-                          addLog(`Global redeployment: Sector ${loc.name} selected.`, "INFO");
-                        }}
-                        className="w-full p-3 flex items-center justify-between border border-terminal-text/10 rounded hover:bg-terminal-text/10 hover:border-terminal-text/30 transition-all group"
-                      >
-                        <div className="flex flex-col items-start">
-                          <span className="text-xs font-bold group-hover:text-terminal-text transition-colors">{loc.name}</span>
-                          <span className="text-sm font-semibold opacity-40 uppercase tracking-tighter">{loc.region}</span>
+                  {/* Pinned selected region */}
+                  {selectedRegion && (() => {
+                    const loc = GLOBAL_LOCATIONS.find(l => l.name === selectedRegion);
+                    if (!loc) return null;
+                    return (
+                      <div className="mb-3">
+                        <div className="text-xs uppercase opacity-40 tracking-widest mb-1 px-1">Active Region</div>
+                        <div className="flex items-center gap-2 p-3 border border-terminal-text/50 bg-terminal-text/10 rounded">
+                          <div className="flex-1 flex flex-col items-start overflow-hidden">
+                            <span className="text-xs font-bold text-terminal-text truncate w-full">{loc.name}</span>
+                            <span className="text-xs opacity-40 uppercase tracking-tighter">{loc.region}</span>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setSelectedRegion(null);
+                              setSearchResults([]);
+                              setRegionSearch('');
+                              addLog(`Region ${selectedRegion} deselected.`, "INFO");
+                            }}
+                            className="text-xs px-2 py-1 border border-alert/30 text-alert hover:bg-alert/10 transition-colors rounded"
+                            title="Deselect Region"
+                          >
+                            ✕
+                          </button>
                         </div>
-                        <ChevronRight className="w-4 h-4 opacity-20 group-hover:opacity-100 transition-all group-hover:translate-x-1" />
+                      </div>
+                    );
+                  })()}
+
+                  {/* Results list */}
+                  <div className="space-y-1">
+                    {/* Section label */}
+                    <div className="text-xs uppercase opacity-40 tracking-widest px-1 mb-1">
+                      {searchResults.length > 0
+                        ? `${searchResults.length} search result${searchResults.length !== 1 ? 's' : ''}${selectedRegion ? ` in ${selectedRegion}` : ''}`
+                        : selectedRegion
+                          ? 'Other Regions'
+                          : 'All Regions'
+                      }
+                    </div>
+
+                    {(searchResults.length > 0
+                      ? searchResults
+                      : GLOBAL_LOCATIONS.filter(l => l.name !== selectedRegion)
+                    )
+                      .slice(0, showAllResults ? undefined : 5)
+                      .map(loc => (
+                        <button
+                          key={loc.name + loc.lat}
+                          onClick={() => {
+                            animateMap(loc.lat, loc.lng, (loc as any).zoom ?? 6);
+                            if (searchResults.length === 0) {
+                              // It's a known region — select it
+                              setSelectedRegion(loc.name);
+                              addLog(`Region ${loc.name} selected.`, "INFO");
+                            } else {
+                              // It's a geocoded result — just navigate
+                              addLog(`Navigating to ${loc.name}.`, "INFO");
+                              setSearchResults([]);
+                              setRegionSearch('');
+                            }
+                          }}
+                          className={cn(
+                            "w-full p-3 flex items-center justify-between border rounded transition-all group",
+                            selectedRegion === loc.name
+                              ? "border-terminal-text/50 bg-terminal-text/10"
+                              : "border-terminal-text/10 hover:bg-terminal-text/10 hover:border-terminal-text/30"
+                          )}
+                        >
+                          <div className="flex flex-col items-start text-left w-full overflow-hidden">
+                            <span className="text-xs font-bold group-hover:text-terminal-text transition-colors truncate w-full">{loc.name}</span>
+                            {loc.region && <span className="text-xs opacity-40 uppercase tracking-tighter">{loc.region}</span>}
+                          </div>
+                          <ChevronRight className="w-4 h-4 opacity-20 group-hover:opacity-100 transition-all group-hover:translate-x-1 shrink-0" />
+                        </button>
+                      ))}
+
+                    {/* Show more / less */}
+                    {(searchResults.length > 0
+                      ? searchResults
+                      : GLOBAL_LOCATIONS.filter(l => l.name !== selectedRegion)
+                    ).length > 5 && (
+                      <button
+                        onClick={() => setShowAllResults(!showAllResults)}
+                        className="w-full py-2 text-xs opacity-50 hover:opacity-100 transition-opacity text-center border border-terminal-text/10 rounded hover:border-terminal-text/30"
+                      >
+                        {showAllResults
+                          ? 'Show less ▲'
+                          : `Show ${(searchResults.length > 0 ? searchResults : GLOBAL_LOCATIONS.filter(l => l.name !== selectedRegion)).length - 5} more ▼`}
                       </button>
-                    ))}
+                    )}
+
+                    {/* Empty state */}
+                    {searchResults.length === 0 && regionSearch.length >= 3 && (
+                      <div className="text-xs opacity-40 italic text-center py-4 border border-dashed border-terminal-text/10 rounded">
+                        No results found for "{regionSearch}"
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               )}
