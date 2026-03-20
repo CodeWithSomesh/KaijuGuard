@@ -140,7 +140,7 @@ export class DroneAgent extends Agent {
       const dy = nextWaypoint.y - this.pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      const speed = 0.015; // Slower cinematic movement
+      const speed = 0.006; // Slower cinematic movement
       if (dist > speed) {
         this.pos.x += (dx / dist) * speed;
         this.pos.y += (dy / dist) * speed;

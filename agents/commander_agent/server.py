@@ -9,7 +9,7 @@ def get_state():
     if os.path.exists(state_file):
         with open(state_file, 'r') as f:
             return json.load(f)
-    return {"fleet": [], "survivors": [], "logs": []}
+    return {"fleet": [], "survivors": [], "logs": [], "stations": []}
 
 def add_command(cmd):
     cmd_file = os.path.join(os.path.dirname(__file__), 'commands_output.json')
@@ -44,9 +44,26 @@ def get_drone_details(drone_id: str) -> str:
             })
     return json.dumps({"error": "Drone not found"})
 
+
+@mcp.tool()
+def get_survivors() -> list[dict]:
+    """Returns all SOS survivor spots visible in the current tactical view."""
+    state = get_state()
+    return state.get("survivors", [])
+
+
+@mcp.tool()
+def get_helicopter_parking() -> list[dict]:
+    """
+    Returns available helicopter parking / resupply hubs.
+    In this simulation, parking is mapped to the active charging stations.
+    """
+    state = get_state()
+    return state.get("stations", [])
+
 @mcp.tool()
 def move_to(drone_id: str, x: float, y: float) -> str:
-    """Dispatches a drone to a specific tactical waypoint (x, y coordinate)."""
+    """Dispatches a drone to a tactical waypoint: x = latitude, y = longitude (WGS84), matching the fleet state."""
     add_command({"name": "move_to", "args": {"drone_id": drone_id, "x": x, "y": y}})
     return f"move_to command queued for {drone_id} to coordinate ({x}, {y})"
 

@@ -657,18 +657,17 @@ export default function App() {
     });
     m.obstacles = obstacles;
 
-    const regionName = Object.keys(GLOBAL_REGIONS).find(k => GLOBAL_REGIONS[k] === initialRegion) || "Global";
-    initialRegion.states.forEach((s: any) => {
-      const droneCount = 2 + Math.floor(Math.random() * 5);
-      for (let i = 0; i < droneCount; i++) {
-        const jitterX = (Math.random() - 0.5) * 0.15;
-        const jitterY = (Math.random() - 0.5) * 0.15;
-        m.addAgent(new DroneAgent(
-          `DR-${regionName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
-          { x: s.lat + jitterX, y: s.lng + jitterY },
-          `KaijuGuard-${s.name}`
-        ));
-      }
+    Object.entries(GLOBAL_REGIONS).forEach(([rName, rData]) => {
+      rData.states.forEach((s: any) => {
+        const droneCount = 2 + Math.floor(Math.random() * 5);
+        for (let i = 0; i < droneCount; i++) {
+          m.addAgent(new DroneAgent(
+            `DR-${rName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
+            { x: s.lat, y: s.lng },
+            `KaijuGuard-${s.name}`
+          ));
+        }
+      });
     });
 
     modelRef.current = m;
@@ -730,6 +729,15 @@ export default function App() {
     return { dx: x2 - x1, dy: y2 - y1 };
   };
 
+  /** Simulation uses x = latitude, y = longitude. Some tool outputs may be swapped as (lng, lat). */
+  const normalizeEngineLatLng = (x: number, y: number): { x: number; y: number } => {
+    const xIsLat = Math.abs(x) <= 90;
+    const yIsLat = Math.abs(y) <= 90;
+    if (xIsLat && !yIsLat) return { x, y };
+    if (!xIsLat && yIsLat) return { x: y, y: x };
+    return { x, y };
+  };
+
   const animateMap = (targetLat: number, targetLng: number, targetZoom: number) => {
     const startLat = mapCenter[0];
     const startLng = mapCenter[1];
@@ -774,12 +782,43 @@ export default function App() {
 
       // Process engine logs back into the UI
       if (modelRef.current!.logsQueue && modelRef.current!.logsQueue.length > 0) {
-        const newLogs = modelRef.current!.logsQueue.map(l => ({
+        const queue = modelRef.current!.logsQueue;
+
+        // Reduce noise: many drones arrive at once, so collapse arrival logs into a single line.
+        const arrivalEntries = queue.filter(l =>
+          typeof l.msg === 'string' && l.msg.startsWith('[ARRIVAL] KaijuGuard')
+        );
+
+        const nonArrivalEntries = queue.filter(l =>
+          !(typeof l.msg === 'string' && l.msg.startsWith('[ARRIVAL] KaijuGuard'))
+        );
+
+        const newLogs = nonArrivalEntries.map(l => ({
           id: Math.random().toString(36).substr(2, 9),
           timestamp: new Date().toLocaleTimeString(),
           type: l.type,
           message: l.msg
         }));
+
+        if (arrivalEntries.length > 0) {
+          const ids = arrivalEntries
+            .map(l => {
+              const m = typeof l.msg === 'string' ? l.msg.match(/KaijuGuard\s+(\S+)\s+reached destination\./) : null;
+              return m?.[1] ?? null;
+            })
+            .filter(Boolean) as string[];
+
+          const shown = ids.slice(0, 4).join(', ');
+          const suffix = ids.length > 4 ? `, ...` : '';
+
+          newLogs.push({
+            id: Math.random().toString(36).substr(2, 9),
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'INFO',
+            message: `[ARRIVAL] ${arrivalEntries.length} KaijuGuard drones reached destination.` + (shown ? ` (${shown}${suffix})` : ''),
+          });
+        }
+
         setLogs(prev => [...prev, ...newLogs]);
         modelRef.current!.logsQueue = [];
       }
@@ -800,17 +839,18 @@ export default function App() {
     m.obstacles = generateObstacles(region);
 
     const regionName = Object.keys(GLOBAL_REGIONS).find(k => GLOBAL_REGIONS[k] === region) || "Global";
-    region.states.forEach((s: any) => {
-      const droneCount = 2 + Math.floor(Math.random() * 5);
-      for (let i = 0; i < droneCount; i++) {
-        const jitterX = (Math.random() - 0.5) * 0.15;
-        const jitterY = (Math.random() - 0.5) * 0.15;
-        m.addAgent(new DroneAgent(
-          `DR-${regionName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
-          { x: s.lat, y: s.lng }, // Spawn exactly at the charging station initially
-          `KaijuGuard-${s.name}`
-        ));
-      }
+
+    Object.entries(GLOBAL_REGIONS).forEach(([rName, rData]) => {
+      rData.states.forEach((s: any) => {
+        const droneCount = 2 + Math.floor(Math.random() * 5);
+        for (let i = 0; i < droneCount; i++) {
+          m.addAgent(new DroneAgent(
+            `DR-${rName.substring(0, 2).toUpperCase()}-${s.name.substring(0, 3).toUpperCase()}-${i + 1}`,
+            { x: s.lat, y: s.lng },
+            `KaijuGuard-${s.name}`
+          ));
+        }
+      });
     });
 
     modelRef.current = m;
@@ -826,10 +866,17 @@ export default function App() {
     const state = region.states[Math.floor(Math.random() * region.states.length)];
 
     addLog(`ALERT: Earthquake detected in ${state.name}, ${regionName}!`, "CRITICAL");
-    addLog(`COMMANDER: Deploying regional KaijuGuard response fleet to ${state.name} epicenter.`, "INFO");
 
-    // Center map on epicenter
-    animateMap(state.lat, state.lng, 8);
+    // Create a localized epicenter clearly offset from the city center (charging hub) to force transit.
+    const epicenter = {
+      lat: state.lat + (Math.random() > 0.5 ? 1 : -1) * (0.15 + Math.random() * 0.1),
+      lng: state.lng + (Math.random() > 0.5 ? 1 : -1) * (0.15 + Math.random() * 0.1)
+    };
+
+    // Auto-zoom to mid-point to frame both the charging hub and the SOS spots
+    const centerLat = (state.lat + epicenter.lat) / 2;
+    const centerLng = (state.lng + epicenter.lng) / 2;
+    animateMap(centerLat, centerLng, 10.5);
 
     // Update stations and obstacles for the current region
     model.stations = region.stations;
@@ -838,30 +885,28 @@ export default function App() {
     // Activate local KaijuGuard units present in the epicenter city
     const localDrones = model.agents.filter(a => a instanceof DroneAgent && (a as DroneAgent).name === `KaijuGuard-${state.name}`) as DroneAgent[];
 
+    // Spawn SOS spots clustered around the epicenter (more spots than drones).
+    const sosCount = 18;
+    const survivorPositions: { x: number; y: number }[] = [];
+    for (let i = 0; i < sosCount; i++) {
+      const pos = {
+        x: epicenter.lat + (Math.random() - 0.5) * 0.07,
+        y: epicenter.lng + (Math.random() - 0.5) * 0.07,
+      };
+      survivorPositions.push(pos);
+      model.addAgent(new SurvivorAgent(`S-${Math.random().toString(36).substr(2, 5)}`, pos));
+    }
+
     if (localDrones.length > 0) {
       localDrones.forEach((drone, i) => {
         drone.status = DroneStatus.DISPATCHED;
-        // Orbit the epicenter
-        const angle = (i / localDrones.length) * Math.PI * 2;
-        const radius = 0.05 + Math.random() * 0.1;
-        drone.setTarget({
-          x: state.lat + Math.cos(angle) * radius,
-          y: state.lng + Math.sin(angle) * radius
-        }, model);
-        addLog(`[LOCAL SWARM] Unit ${drone.id} responding to tactical alert in ${state.name}.`, "INFO");
+        // Ensure every active unit starts moving toward a designated SOS point.
+        const target = survivorPositions[i % survivorPositions.length];
+        drone.setTarget({ x: target.x, y: target.y }, model);
       });
-      addLog(`COMMANDER: Swarm-intelligence algorithms managing ${localDrones.length} local units.`, "INFO");
+      addLog(`[LOCAL SWARM] Deploying ${localDrones.length} KaijuGuard units to ${sosCount} SOS spots.`, "INFO");
     } else {
       addLog(`WARNING: No local units available in ${state.name}!`, "WARNING");
-    }
-
-    // Spawn survivors around epicenter
-    for (let i = 0; i < 6; i++) {
-      const s = new SurvivorAgent(`S-${Math.random().toString(36).substr(2, 5)}`, {
-        x: state.lat + (Math.random() - 0.5) * 0.3,
-        y: state.lng + (Math.random() - 0.5) * 0.3
-      });
-      model.addAgent(s);
     }
 
     // Trigger analysis to respond
@@ -897,7 +942,7 @@ export default function App() {
     setIsAnalyzing(true);
     addLog("Initiating Tactical Analysis...", "INFO");
 
-    const result = await getTacticalAnalysis(drones, survivors, logs);
+    const result = await getTacticalAnalysis(drones, survivors, logs, modelRef.current?.stations ?? []);
 
     if (result.summary) {
       addLog("Analysis Complete", "INFO", result.summary);
@@ -906,6 +951,12 @@ export default function App() {
     if (result.toolCalls) {
       for (const call of result.toolCalls) {
         executeTool(call.name, call.args);
+      }
+
+      // One-line deployment summary (avoid flooding the terminal).
+      const moveCalls = result.toolCalls.filter((c: any) => c.name === 'move_to' || c.name === 'dispatch_drone');
+      if (moveCalls.length > 0) {
+        addLog(`[COMMAND] Deploying drones: ${moveCalls.length} assignments.`, "INFO");
       }
     }
 
@@ -932,9 +983,10 @@ export default function App() {
       case 'manage_resources':
         droneAgents.forEach(d => {
           if (d.battery < 25 && d.status !== DroneStatus.RETURNING && d.status !== DroneStatus.CHARGING) {
-            let nearest = CHARGING_STATIONS[0];
+            const stations = modelRef.current?.stations?.length ? modelRef.current.stations : CHARGING_STATIONS;
+            let nearest = stations[0];
             let minDist = Infinity;
-            CHARGING_STATIONS.forEach(s => {
+            stations.forEach(s => {
               const dist = Math.sqrt(Math.pow(s.position.x - d.pos.x, 2) + Math.pow(s.position.y - d.pos.y, 2));
               if (dist < minDist) {
                 minDist = dist;
@@ -943,16 +995,21 @@ export default function App() {
             });
             addLog(`Re-routing ${d.id} to ${nearest.name} (Low Battery: ${d.battery.toFixed(1)}%)`, "WARNING");
             d.status = DroneStatus.RETURNING;
-            d.target = nearest.position;
+            d.setTarget(nearest.position, modelRef.current!);
           }
         });
         break;
       case 'dispatch_drone':
         const idleDrone = droneAgents.find(d => d.status === DroneStatus.IDLE || d.status === DroneStatus.SCANNING);
         if (idleDrone) {
-          addLog(`[DISPATCH] Drone ${idleDrone.id} dispatched to survivor at ${args.target_lat_long.x.toFixed(4)}, ${args.target_lat_long.y.toFixed(4)}`, "INFO");
           idleDrone.status = DroneStatus.DISPATCHED;
-          idleDrone.target = args.target_lat_long;
+          const raw = args.target_lat_long;
+          const lat = raw?.lat ?? raw?.x;
+          const lng = raw?.lng ?? raw?.y;
+          if (typeof lat === 'number' && typeof lng === 'number') {
+            const pos = normalizeEngineLatLng(lat, lng);
+            idleDrone.setTarget(pos, modelRef.current!);
+          }
         }
         break;
       case 'detect_survivors': // maps to thermal_scan
@@ -993,7 +1050,6 @@ export default function App() {
       case 'move_to':
         const targetMoveDrone = droneAgents.find(d => d.id === args.drone_id);
         if (targetMoveDrone) {
-          addLog(`[COMMAND] Routing ${targetMoveDrone.id} to tactical waypoint [${args.x.toFixed(4)}, ${args.y.toFixed(4)}]`, "INFO");
           targetMoveDrone.status = DroneStatus.DISPATCHED;
           targetMoveDrone.setTarget({ x: args.x, y: args.y }, modelRef.current!);
         }
@@ -1001,9 +1057,10 @@ export default function App() {
       case 'return_to_base':
         const targetChargeDrone = droneAgents.find(d => d.id === args.drone_id);
         if (targetChargeDrone) {
-          let nearest = CHARGING_STATIONS[0];
+          const stations = modelRef.current?.stations?.length ? modelRef.current.stations : CHARGING_STATIONS;
+          let nearest = stations[0];
           let minDist = Infinity;
-          CHARGING_STATIONS.forEach(s => {
+          stations.forEach(s => {
             const dist = Math.sqrt(Math.pow(s.position.x - targetChargeDrone.pos.x, 2) + Math.pow(s.position.y - targetChargeDrone.pos.y, 2));
             if (dist < minDist) {
               minDist = dist;
@@ -1428,37 +1485,34 @@ export default function App() {
                   ))}
 
                   {/* Trajectory Paths (A* Waypoints) */}
-                  {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).map(drone => {
+                  {drones.filter(d => d.status === DroneStatus.DISPATCHED || d.status === DroneStatus.RETURNING).flatMap(drone => {
                     const droneAgent = model.agents.find(a => a.id === drone.id) as DroneAgent;
-                    if (!droneAgent || droneAgent.path.length === 0) return null;
+                    if (!droneAgent || droneAgent.path.length === 0) return [];
 
                     const fullPath = [{ x: drone.position.x, y: drone.position.y }, ...droneAgent.path];
 
-                    return (<MapGroup key={`path-group-${drone.id}`}>
-                      {fullPath.slice(1).map((pos, idx) => {
-                        const prevPos = fullPath[idx];
-                        const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
-                        return (
-                          // @ts-ignore
-                          <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
-                            <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
-                              <line
-                                x1="0"
-                                y1="0"
-                                x2={offset.dx}
-                                y2={offset.dy}
-                                stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
-                                strokeWidth="2"
-                                strokeDasharray="6 6"
-                                strokeOpacity={1 - (idx / fullPath.length) * 0.6}
-                                className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
-                              />
-                            </svg>
-                          </Overlay>
-                        );
-                      })}
-                    </MapGroup>
-                    );
+                    return fullPath.slice(1).map((pos, idx) => {
+                      const prevPos = fullPath[idx];
+                      const offset = getPixelOffset([prevPos.x, prevPos.y], [pos.x, pos.y], mapZoom);
+                      return (
+                        // @ts-ignore
+                        <Overlay key={`path-${drone.id}-${idx}`} anchor={[prevPos.x, prevPos.y]}>
+                          <svg className="overflow-visible pointer-events-none absolute" style={{ width: 1, height: 1 }}>
+                            <line
+                              x1="0"
+                              y1="0"
+                              x2={offset.dx}
+                              y2={offset.dy}
+                              stroke={drone.status === DroneStatus.RETURNING ? "#f27d26" : "#00ff88"}
+                              strokeWidth="2"
+                              strokeDasharray="6 6"
+                              strokeOpacity={1 - (idx / fullPath.length) * 0.6}
+                              className="animate-[dash_1s_linear_infinite] filter drop-shadow-[0_0_5px_currentColor]"
+                            />
+                          </svg>
+                        </Overlay>
+                      );
+                    });
                   })}
 
                   {/* Charging Stations */}
@@ -1469,20 +1523,17 @@ export default function App() {
                         <div className="w-4 h-4 border border-terminal-text bg-black/60 flex items-center justify-center shadow-lg">
                           <Zap className="w-2 h-2 text-terminal-text" />
                         </div>
-                        <span className="text-xs uppercase bg-black/80 px-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                          {s.name}
-                        </span>
                       </div>
                     </Overlay>
                   ))}
 
-                  {/* Drones */}
-                  {drones.filter(d => d.status !== DroneStatus.IDLE).map(drone => (
+                  {/* Drones (including IDLE at hubs, so they are visible before dispatch and animate along path) */}
+                  {drones.map(drone => (
                     // @ts-ignore
-                    <Overlay key={drone.id} anchor={[drone.position.x, drone.position.y]} offset={[10, 10]}>
+                    <Overlay key={drone.id} anchor={[drone.position.x, drone.position.y]} offset={[20, 20]}>
                       <div
                         className={cn(
-                          "flex flex-col items-center cursor-pointer transition-all hover:scale-110",
+                          "flex flex-col items-center justify-center cursor-pointer transition-all hover:scale-110",
                           selectedDrone === drone.id && "scale-125"
                         )}
                         onClick={(e) => {
@@ -1491,7 +1542,7 @@ export default function App() {
                           setContextMenu({ droneId: drone.id, pos: drone.position });
                         }}
                       >
-                        <div className="relative group">
+                        <div className="relative group flex items-center justify-center">
                           <div className={cn(
                             "w-10 h-10 flex items-center justify-center relative z-10 transition-all duration-300",
                             drone.status === DroneStatus.SCANNING && "animate-pulse",
@@ -1500,19 +1551,18 @@ export default function App() {
                             <img
                               src="/drone_icon.png"
                               alt="Tactical Drone"
-                              className={cn("w-full h-full object-contain", drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200")}
-                              style={{
-                                transform: `rotate(${drone.target ? Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90 : 0}deg)`
-                              }}
+                              className={cn(
+                                "w-full h-full object-contain filter brightness-150 drop-shadow-[0_0_8px_rgba(0,255,136,0.8)]",
+                                drone.battery < 15 && "sepia hue-rotate-[320deg] saturate-200"
+                              )}
+                              style={{ transform: `rotate(${drone.target ? Math.atan2(drone.target.y - drone.position.y, drone.target.x - drone.position.x) * 180 / Math.PI + 90 : 0}deg)` }}
                             />
                           </div>
-
-                          {/* Low Battery Indicator Ring */}
                           {drone.battery < 15 && (
                             <div className="absolute -inset-2 border-2 border-red-500 border-dashed rounded-full animate-[spin_3s_linear_infinite] z-0 opacity-80" />
                           )}
                         </div>
-                        <span className="text-xs font-semibold font-bold bg-black/80 px-1 mt-1 border border-terminal-text/20 shadow-md z-20">
+                        <span className="absolute top-full mt-1 whitespace-nowrap text-xs font-semibold font-bold bg-black/80 px-1 border border-terminal-text/20 shadow-md z-20">
                           {drone.id}
                         </span>
                       </div>
@@ -1609,17 +1659,16 @@ export default function App() {
                   {/* Survivors */}
                   {survivors.map(s => (
                     // @ts-ignore
-                    <Overlay key={s.id} anchor={[s.lat, s.lng]} offset={[10, 10]}>
+                    <Overlay key={s.id} anchor={[s.lat, s.lng]} offset={[8, 8]}>
                       <motion.div
                         initial={{ scale: 0, opacity: 0 }}
                         animate={{ scale: [1, 1.2, 1], opacity: [0.6, 1, 0.6] }}
                         transition={{ repeat: Infinity, duration: 2 }}
-                        className="flex flex-col items-center"
+                        className="flex flex-col relative items-center justify-center w-4 h-4"
                       >
-                        <div className="w-4 h-4 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg">
-                          <Users className="w-2 h-2 text-white -rotate-45" />
-                        </div>
-                        <span className="text-xs font-bold text-red-500 bg-black/80 px-1 mt-1">SOS</span>
+                        <div className="absolute inset-0 bg-red-600 rotate-45 flex items-center justify-center border border-white/40 shadow-lg" />
+                        <Users className="w-2 h-2 text-white relative z-10" />
+                        <span className="absolute top-full mt-1 text-xs font-bold text-red-500 bg-black/80 px-1">SOS</span>
                       </motion.div>
                     </Overlay>
                   ))}

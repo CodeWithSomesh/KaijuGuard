@@ -3,13 +3,14 @@ import { Drone, Survivor, TacticalLog } from "../types";
 export async function getTacticalAnalysis(
   fleet: Drone[],
   survivors: Survivor[],
-  logs: TacticalLog[]
+  logs: TacticalLog[],
+  stations?: any[]
 ) {
   try {
     const response = await fetch('/api/agent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fleet, survivors, logs }),
+      body: JSON.stringify({ fleet, survivors, logs, stations: stations ?? [] }),
     });
     
     if (!response.ok) {
